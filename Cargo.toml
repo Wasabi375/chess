@@ -1,0 +1,10 @@
+[package]
+name = "chess"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+iced = { version = "0.9", features = ["image"] }
+iced_native = { version = "0.10.3" }
+rand = "0.8.5"
