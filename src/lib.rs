@@ -540,7 +540,7 @@ impl Board {
         }
 
         let clocks_str: String = iter.collect();
-        let mut clocks = clocks_str.trim_end().split(" ");
+        let mut clocks = clocks_str.trim_end().split(' ');
 
         let half_moves_since_capture: u8 = if let Some(half_moves) = clocks.next() {
             half_moves
@@ -697,7 +697,7 @@ impl Board {
 
     pub fn winner(&self) -> Option<Option<Color>> {
         let valid_moves = self.generate_valid_moves(self.next_move);
-        if valid_moves.len() == 0 {
+        if valid_moves.is_empty() {
             let attack_moves = self.generate_attacking_moves(!self.next_move);
             let king_pos = self.piece_positions(self.next_move).king;
             if attack_moves.iter().any(|m| m.to == king_pos) {
@@ -843,7 +843,7 @@ impl Board {
             let x = x + offset.0;
             let y = y + offset.1;
 
-            if x < 0 || x >= 8 || y < 0 || y >= 8 {
+            if !(0..8).contains(&x) || !(0..8).contains(&y) {
                 continue;
             }
 
@@ -901,13 +901,11 @@ impl Board {
 
         // move 1 forward
         if let Some(target_idx) = bidx(x, y + dir) {
-            if self[target_idx].is_none() {
-                if add_moves(target_idx, y + dir, false) {
-                    // check if we can move 2 forward
-                    let target_idx = bidx(x, y + 2 * dir).unwrap();
-                    if y == double_move_start && self[target_idx].is_none() {
-                        add_moves(target_idx, y + 2 * dir, false);
-                    }
+            if self[target_idx].is_none() && add_moves(target_idx, y + dir, false) {
+                // check if we can move 2 forward
+                let target_idx = bidx(x, y + 2 * dir).unwrap();
+                if y == double_move_start && self[target_idx].is_none() {
+                    add_moves(target_idx, y + 2 * dir, false);
                 }
             }
         }
@@ -945,7 +943,7 @@ impl Board {
         let color = piece.color();
 
         let mut search = |x: i8, y: i8| {
-            if x < 0 || x >= 8 || y < 0 || y >= 8 {
+            if !(0..8).contains(&x) || !(0..8).contains(&y) {
                 return;
             }
             let bidx = (y * 8 + x) as u8;
@@ -993,22 +991,17 @@ impl Board {
 
             let enemy_moves = self.generate_attacking_moves(!color);
 
-            if castle_king {
-                if !enemy_moves
+            if castle_king && !enemy_moves
                     .iter()
-                    .any(|m| m.to == bidx(5, castle_row) || m.to == bidx(6, castle_row))
-                {
-                    moves.push(Move::castle(piece_at, bidx(6, castle_row)));
-                }
+                    .any(|m| m.to == bidx(5, castle_row) || m.to == bidx(6, castle_row)) {
+                moves.push(Move::castle(piece_at, bidx(6, castle_row)));
             }
-            if castle_queen {
-                if !enemy_moves.iter().any(|m| {
+            if castle_queen && !enemy_moves.iter().any(|m| {
                     m.to == bidx(1, castle_row)
                         || m.to == bidx(2, castle_row)
                         || m.to == bidx(3, castle_row)
                 }) {
-                    moves.push(Move::castle(piece_at, bidx(2, castle_row)));
-                }
+                moves.push(Move::castle(piece_at, bidx(2, castle_row)));
             }
         }
 
@@ -1034,7 +1027,7 @@ impl Board {
                 loop {
                     pos_x += x_off;
                     pos_y += y_off;
-                    if pos_x >= 8 || pos_x < 0 || pos_y >= 8 || pos_y < 0 {
+                    if !(0..8).contains(&pos_x) || !(0..8).contains(&pos_y) {
                         break;
                     }
                     let board_idx = (pos_x + pos_y * 8) as u8;
@@ -1246,7 +1239,7 @@ impl Board {
             .previous_positions
             .entry(self.zobrist_hash)
             .or_insert(0);
-        *count = *count + 1;
+        *count += 1;
     }
 }
 

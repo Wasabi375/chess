@@ -62,7 +62,7 @@ impl GameState {
                 let target = board[square];
                 if target.is_some() {
                     let valid_moves = board.generate_valid_moves_for_piece(square);
-                    if valid_moves.len() > 0 {
+                    if !valid_moves.is_empty() {
                         *self = GameState::PieceSelected {
                             target_square: square,
                             valid_moves,
