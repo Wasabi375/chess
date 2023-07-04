@@ -140,7 +140,7 @@ enum Message {
     Move(Move),
     GenerateFen,
     LoadFen,
-    RestartGame(Board),
+    RestartGame(Box<Board>),
     CountMoves,
 }
 
@@ -194,7 +194,7 @@ impl Application for Game {
                         println!("Loading fen \"{fen}\"");
                         let board = Board::from_fen(&fen);
                         match board {
-                            Ok(board) => Message::RestartGame(board),
+                            Ok(board) => Message::RestartGame(Box::new(board)),
                             Err(e) => {
                                 println!("Could not load fen \"{fen}\": {e:?}");
                                 Message::None
@@ -207,7 +207,7 @@ impl Application for Game {
                 })
             }
             Message::RestartGame(board) => {
-                self.board = board;
+                self.board = *board;
                 self.state = Default::default();
                 self.highlighted.clear();
                 None
@@ -344,9 +344,9 @@ impl Application for Game {
                 text(format!("Move: {}", self.board.full_move_count)),
                 button(text("Generate Fen")).on_press(Message::GenerateFen),
                 button(text("Load Fen")).on_press(Message::LoadFen),
-                button(text("Restart Game")).on_press(Message::RestartGame(
+                button(text("Restart Game")).on_press(Message::RestartGame(Box::new(
                     Board::from_fen(START_BOARD_FEN).unwrap()
-                )),
+                ))),
                 button(text("Move Count")).on_press(Message::CountMoves),
             ]
             .padding(10)

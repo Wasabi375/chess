@@ -307,8 +307,8 @@ impl<H: BitXorAssign + Clone + Default> ZobristHasher<H> {
             hash ^= self.white_king.castle_king.clone();
         }
 
-        for i in 0..64 {
-            if let Some(piece) = field[i] {
+        for (i, piece) in field.iter().enumerate() {
+            if let Some(piece) = *piece {
                 hash ^= self.piece_hash(i, piece);
             }
         }
@@ -991,16 +991,20 @@ impl Board {
 
             let enemy_moves = self.generate_attacking_moves(!color);
 
-            if castle_king && !enemy_moves
+            if castle_king
+                && !enemy_moves
                     .iter()
-                    .any(|m| m.to == bidx(5, castle_row) || m.to == bidx(6, castle_row)) {
+                    .any(|m| m.to == bidx(5, castle_row) || m.to == bidx(6, castle_row))
+            {
                 moves.push(Move::castle(piece_at, bidx(6, castle_row)));
             }
-            if castle_queen && !enemy_moves.iter().any(|m| {
+            if castle_queen
+                && !enemy_moves.iter().any(|m| {
                     m.to == bidx(1, castle_row)
                         || m.to == bidx(2, castle_row)
                         || m.to == bidx(3, castle_row)
-                }) {
+                })
+            {
                 moves.push(Move::castle(piece_at, bidx(2, castle_row)));
             }
         }
