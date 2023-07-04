@@ -1,6 +1,6 @@
 use core::fmt;
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     fmt::Display,
     hash::{Hash, Hasher},
     mem::{self, MaybeUninit},
@@ -246,10 +246,17 @@ impl<H: Clone> ZobristHasher<H> {
 
 impl ZobristHasher<u64> {
     fn new_random(rng: &mut impl Rng) -> Self {
+        let mut used_hashes = HashSet::new();
+        let mut rng = || loop {
+            let result = rng.next_u64();
+            if used_hashes.insert(result) {
+                break result;
+            }
+        };
         let en_passant_row = {
             let mut data: [MaybeUninit<u64>; 8] = unsafe { MaybeUninit::uninit().assume_init() };
             for elem in &mut data {
-                elem.write(rng.next_u64());
+                elem.write(rng());
             }
             unsafe { mem::transmute(data) }
         };
@@ -257,21 +264,21 @@ impl ZobristHasher<u64> {
             let mut data: [MaybeUninit<u64>; 64 * 12] =
                 unsafe { MaybeUninit::uninit().assume_init() };
             for elem in &mut data {
-                elem.write(rng.next_u64());
+                elem.write(rng());
             }
             unsafe { mem::transmute(data) }
         };
 
         Self {
-            black_move: rng.next_u64(),
+            black_move: rng(),
             en_passant_col: en_passant_row,
             white_king: ZobristHasherKingMoves {
-                castle_king: rng.next_u64(),
-                castle_queen: rng.next_u64(),
+                castle_king: rng(),
+                castle_queen: rng(),
             },
             black_king: ZobristHasherKingMoves {
-                castle_king: rng.next_u64(),
-                castle_queen: rng.next_u64(),
+                castle_king: rng(),
+                castle_queen: rng(),
             },
             piece_hash,
         }
