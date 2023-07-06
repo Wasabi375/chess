@@ -5,6 +5,15 @@ edition = "2021"
 
 
 [dependencies]
+anyhow = "1.0.71"
 iced = { version = "0.9", features = ["image"] }
 iced_native = { version = "0.10.3" }
 rand = "0.8.5"
+
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[[bench]]
+name = "engine_benchmarks"
+harness = false

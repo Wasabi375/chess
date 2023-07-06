@@ -1,0 +1,115 @@
+{
+  "name": "stupid-search-all",
+  "benchmarks": {
+    "ella::search_to_depth/1": {
+      "baseline": "stupid-search-all",
+      "fullname": "stupid-search-all/ella::search_to_depth/1",
+      "criterion_benchmark_v1": {
+        "group_id": "ella::search_to_depth",
+        "function_id": null,
+        "value_str": "1",
+        "throughput": null,
+        "full_id": "ella::search_to_depth/1",
+        "directory_name": "ella__search_to_depth/1"
+      },
+      "criterion_estimates_v1": {
+        "mean": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 12127.399292861077,
+            "upper_bound": 12194.543502233124
+          },
+          "point_estimate": 12159.2779428194,
+          "standard_error": 17.10841694108167
+        },
+        "median": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 12106.77415235579,
+            "upper_bound": 12203.414815059445
+          },
+          "point_estimate": 12163.118338837518,
+          "standard_error": 21.25133508080659
+        },
+        "median_abs_dev": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 6.306271443524285,
+            "upper_bound": 96.98084007481128
+          },
+          "point_estimate": 66.84856895454985,
+          "standard_error": 27.193365657180177
+        },
+        "slope": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 12115.827925328513,
+            "upper_bound": 12194.105158682649
+          },
+          "point_estimate": 12152.746460224056,
+          "standard_error": 19.936047288334898
+        },
+        "std_dev": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 29.87891255162621,
+            "upper_bound": 72.62229597185703
+          },
+          "point_estimate": 57.05188051786568,
+          "standard_error": 11.161144399301396
+        }
+      }
+    },
+    "ella::search_to_depth/5": {
+      "baseline": "stupid-search-all",
+      "fullname": "stupid-search-all/ella::search_to_depth/5",
+      "criterion_benchmark_v1": {
+        "group_id": "ella::search_to_depth",
+        "function_id": null,
+        "value_str": "5",
+        "throughput": null,
+        "full_id": "ella::search_to_depth/5",
+        "directory_name": "ella__search_to_depth/5"
+      },
+      "criterion_estimates_v1": {
+        "mean": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 3423596844.0,
+            "upper_bound": 3440103942.395
+          },
+          "point_estimate": 3431038236.7,
+          "standard_error": 4267838.926242848
+        },
+        "median": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 3421304176.0,
+            "upper_bound": 3441500979.0
+          },
+          "point_estimate": 3425139988.0,
+          "standard_error": 4662119.176884496
+        },
+        "median_abs_dev": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 1043859.352567792,
+            "upper_bound": 23113698.74854982
+          },
+          "point_estimate": 6462023.921576142,
+          "standard_error": 5312855.436596478
+        },
+        "slope": null,
+        "std_dev": {
+          "confidence_interval": {
+            "confidence_level": 0.95,
+            "lower_bound": 3900476.148131748,
+            "upper_bound": 19482857.30487423
+          },
+          "point_estimate": 14260074.01118535,
+          "standard_error": 3946766.511014401
+        }
+      }
+    }
+  }
+}
