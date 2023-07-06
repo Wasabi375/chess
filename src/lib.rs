@@ -705,9 +705,7 @@ impl Board {
     pub fn winner(&self) -> Option<Option<Color>> {
         let valid_moves = self.generate_valid_moves(self.next_move);
         if valid_moves.is_empty() {
-            let attack_moves = self.generate_attacking_moves(!self.next_move);
-            let king_pos = self.piece_positions(self.next_move).king;
-            if attack_moves.iter().any(|m| m.to == king_pos) {
+            if self.is_in_check(self.next_move) {
                 Some(Some(!self.next_move))
             } else {
                 Some(None)
@@ -1120,8 +1118,6 @@ impl Board {
                 }
                 slf[en_passant_idx] = None;
 
-                println!("EnPassant: {mve:?}, col: {en_passant_col}, row: {en_passant_row}, idx: {en_passant_idx}");
-
                 slf.half_moves_since_capture = 0;
 
                 return;
@@ -1135,11 +1131,10 @@ impl Board {
                     (mve.to - 2, mve.to + 1)
                 };
 
-                debug_assert!(slf[rook_from].is_some());
-                debug_assert_eq!(slf[rook_from].unwrap().typ(), PieceType::Rook);
-
                 let king = slf[mve.from].unwrap();
                 let rook = slf[rook_from].unwrap();
+
+                debug_assert_eq!(rook.typ(), PieceType::Rook);
 
                 // move king
                 slf[mve.to] = slf[mve.from];
@@ -1176,6 +1171,36 @@ impl Board {
             if let Some(caputred) = slf[mve.to] {
                 slf.half_moves_since_capture = 0;
                 slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.to, caputred);
+
+                if caputred.typ() == PieceType::Rook {
+                    match mve.to {
+                        0 => {
+                            if slf.black_pieces.castle_queen {
+                                slf.zobrist_hash ^= slf.zobrist_hasher.black_king.castle_queen;
+                            }
+                            slf.black_pieces.castle_queen = false
+                        }
+                        7 => {
+                            if slf.black_pieces.castle_king {
+                                slf.zobrist_hash ^= slf.zobrist_hasher.black_king.castle_king;
+                            }
+                            slf.black_pieces.castle_king = false
+                        }
+                        56 => {
+                            if slf.white_pieces.castle_queen {
+                                slf.zobrist_hash ^= slf.zobrist_hasher.white_king.castle_queen;
+                            }
+                            slf.white_pieces.castle_queen = false
+                        }
+                        63 => {
+                            if slf.white_pieces.castle_king {
+                                slf.zobrist_hash ^= slf.zobrist_hasher.white_king.castle_king;
+                            }
+                            slf.white_pieces.castle_king = false
+                        }
+                        _ => {}
+                    }
+                }
             } else {
                 slf.half_moves_since_capture += 1;
             }
@@ -1282,25 +1307,36 @@ impl IndexMut<u8> for Board {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use crate::{Board, Color, Piece, PieceType, START_BOARD_FEN};
-    use std::collections::HashSet;
+pub mod test_fens {
+    use crate::START_BOARD_FEN;
 
-    const MOST_POSS_MOVES_FEN: &str = "R6R/3Q4/1Q4Q1/4Q3/2Q4Q/Q4Q2/pp1Q4/kBNNK1B1 w - - 0 0";
-    const MOST_POSS_MOVES_FEN_B: &str = "R6R/3Q4/1Q4Q1/4Q3/2Q4Q/Q4Q2/pp1Q4/kBNNK1B1 b - - 0 0";
-    const MANY_POSS_MOVES_FEN_W: &str = "r6R/2pbpBk1/1p1B1N2/6q1/4Q3/2nn1p2/1PK1NbP1/R6r w - - 0 0";
-    const MANY_POSS_MOVES_FEN_B: &str = "r6R/2pbpBk1/1p1B1N2/6q1/4Q3/2nn1p2/1PK1NbP1/R6r b - - 0 0";
-    const EN_PASSANT_POS_W: &str = "rnbqkbnr/ppp2ppp/4p3/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 0";
-    const EN_PASSANT_POS_W2: &str = "rnbqkbnr/pppp2pp/4p3/4Pp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 0";
-    const EN_PASSANT_POS_B: &str = "rnbqkbnr/ppppp1pp/8/4P3/5pP1/8/PPPP1P1P/RNBQKBNR b KQkq g3 0 0";
-    const CASTLE_QUEEN_W: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/R3KBNR w KQkq - 0 0";
-    const CASTLE_KING_W: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQK2R w KQkq - 0 0";
-    const CASTLE_KING_B: &str = "rnbqk2r/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 0";
-    const CASTLE_QUEEN_B: &str = "r3kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 0";
-    const WHITE_PROMOTION: &str = "rnbqkb1r/pppp2Pp/2n5/8/8/8/PPP1PPPP/RNBQKBNR w KQkq - 1 4";
+    pub const MOST_POSS_MOVES_FEN: &str = "R6R/3Q4/1Q4Q1/4Q3/2Q4Q/Q4Q2/pp1Q4/kBNNK1B1 w - - 0 0";
+    pub const MOST_POSS_MOVES_FEN_B: &str = "R6R/3Q4/1Q4Q1/4Q3/2Q4Q/Q4Q2/pp1Q4/kBNNK1B1 b - - 0 0";
+    pub const MANY_POSS_MOVES_FEN_W: &str =
+        "r6R/2pbpBk1/1p1B1N2/6q1/4Q3/2nn1p2/1PK1NbP1/R6r w - - 0 0";
+    pub const MANY_POSS_MOVES_FEN_B: &str =
+        "r6R/2pbpBk1/1p1B1N2/6q1/4Q3/2nn1p2/1PK1NbP1/R6r b - - 0 0";
+    pub const EN_PASSANT_POS_W: &str =
+        "rnbqkbnr/ppp2ppp/4p3/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 0";
+    pub const EN_PASSANT_POS_W2: &str =
+        "rnbqkbnr/pppp2pp/4p3/4Pp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 0";
+    pub const EN_PASSANT_POS_B: &str =
+        "rnbqkbnr/ppppp1pp/8/4P3/5pP1/8/PPPP1P1P/RNBQKBNR b KQkq g3 0 0";
+    pub const CASTLE_QUEEN_W: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/R3KBNR w KQkq - 0 0";
+    pub const CASTLE_KING_W: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQK2R w KQkq - 0 0";
+    pub const CASTLE_KING_B: &str = "rnbqk2r/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 0";
+    pub const CASTLE_QUEEN_B: &str = "r3kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 0";
+    pub const WHITE_PROMOTION: &str = "rnbqkb1r/pppp2Pp/2n5/8/8/8/PPP1PPPP/RNBQKBNR w KQkq - 1 4";
+    pub const CAPTURE_BLACK_KING_ROOK: &str =
+        "rnbqk2r/pppp1pPp/4p3/2bn4/8/8/PPPPP1PP/RNBQKBNR w KQkq - 1 4";
+    pub const CAPTURE_BLACK_QUEEN_ROOK: &str =
+        "r3kbnr/p1pp1ppp/bpB1p3/6q1/8/6PN/PPPPPP1P/RNBQ1RK1 w kq - 1 5";
+    pub const CAPTURE_WHITE_KING_ROOK: &str =
+        "rn1qkb1r/pbpppppp/1p3n2/6N1/8/6PB/PPPPPP1P/RNBQK2R b KQkq - 4 3";
+    pub const CAPTURE_WHITE_QUEEN_ROOK: &str =
+        "rnbqkbnr/pp1ppppp/8/1N4B1/8/3P4/PpPQPPPP/R3KBNR b KQkq - 1 4";
 
-    const ALL_TEST_FENS: &[&str] = &[
+    pub const ALL_TEST_FENS: &[&str] = &[
         START_BOARD_FEN,
         MOST_POSS_MOVES_FEN,
         MOST_POSS_MOVES_FEN_B,
@@ -1314,7 +1350,20 @@ mod test {
         CASTLE_QUEEN_B,
         CASTLE_QUEEN_W,
         WHITE_PROMOTION,
+        CAPTURE_BLACK_KING_ROOK,
+        CAPTURE_BLACK_QUEEN_ROOK,
+        CAPTURE_WHITE_KING_ROOK,
+        CAPTURE_BLACK_QUEEN_ROOK,
     ];
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        test_fens::{ALL_TEST_FENS, EN_PASSANT_POS_B, EN_PASSANT_POS_W},
+        Board, Color, Piece, PieceType,
+    };
+    use std::collections::HashSet;
 
     #[test]
     fn pices_are_unique_u8() {
@@ -1341,7 +1390,6 @@ mod test {
         for fen in ALL_TEST_FENS {
             let board = Board::from_fen(fen).unwrap();
             let generated_fen = board.generate_fen();
-            println!("FEN: {generated_fen}");
             let board_from_generated = Board::from_fen(&generated_fen).unwrap();
             assert_eq!(board, board_from_generated);
         }
@@ -1358,13 +1406,13 @@ mod test {
 
     mod moves {
         use crate::{
-            test::{
-                CASTLE_KING_B, CASTLE_KING_W, CASTLE_QUEEN_B, CASTLE_QUEEN_W, EN_PASSANT_POS_B,
+            test_fens::{
+                CAPTURE_BLACK_KING_ROOK, CAPTURE_BLACK_QUEEN_ROOK, CAPTURE_WHITE_KING_ROOK,
+                CAPTURE_WHITE_QUEEN_ROOK, CASTLE_KING_B, CASTLE_KING_W, CASTLE_QUEEN_B,
+                CASTLE_QUEEN_W, EN_PASSANT_POS_B, EN_PASSANT_POS_W, EN_PASSANT_POS_W2,
             },
-            Board, Move,
+            Board, Color, Move, Piece, PieceType,
         };
-
-        use super::{EN_PASSANT_POS_W, EN_PASSANT_POS_W2};
 
         #[test]
         fn en_passant_white() {
@@ -1431,6 +1479,62 @@ mod test {
                 Board::from_fen("rnbq1rk1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQ - 1 1").unwrap();
             assert_eq!(board, expected);
         }
+
+        #[test]
+        fn captured_rook_disables_castle_black_king() {
+            let board = Board::from_fen(CAPTURE_BLACK_KING_ROOK).unwrap();
+            for promotion in PieceType::ALL_PROMTION_TARGETS {
+                let target_piece = Piece::new(promotion, Color::White);
+                let mut board = board.clone();
+                board.play_move(Move::promotion(14, 7, target_piece));
+                let expected = Board::from_fen(&format!(
+                    "rnbqk2{}/pppp1p1p/4p3/2bn4/8/8/PPPPP1PP/RNBQKBNR b KQq - 0 4",
+                    target_piece.fen_char()
+                ))
+                .unwrap();
+                assert!(!board.black_pieces.castle_king);
+                assert_eq!(board, expected);
+            }
+        }
+
+        #[test]
+        fn captured_rook_disables_castle_black_queen() {
+            let mut board = Board::from_fen(CAPTURE_BLACK_QUEEN_ROOK).unwrap();
+            board.play_move(Move::new(18, 0));
+            let expected =
+                Board::from_fen("B3kbnr/p1pp1ppp/bp2p3/6q1/8/6PN/PPPPPP1P/RNBQ1RK1 b k - 0 5")
+                    .unwrap();
+            assert!(!board.black_pieces.castle_queen);
+            assert_eq!(board, expected);
+        }
+
+        #[test]
+        fn captured_rook_disables_castle_white_king() {
+            let mut board = Board::from_fen(CAPTURE_WHITE_KING_ROOK).unwrap();
+            board.play_move(Move::new(9, 63));
+            let expected =
+                Board::from_fen("rn1qkb1r/p1pppppp/1p3n2/6N1/8/6PB/PPPPPP1P/RNBQK2b w Qkq - 0 4")
+                    .unwrap();
+            assert!(!board.white_pieces.castle_king);
+            assert_eq!(board, expected);
+        }
+
+        #[test]
+        fn captured_rook_disables_castle_white_queen() {
+            let board = Board::from_fen(CAPTURE_WHITE_QUEEN_ROOK).unwrap();
+            for promotion in PieceType::ALL_PROMTION_TARGETS {
+                let target_piece = Piece::new(promotion, Color::White);
+                let mut board = board.clone();
+                board.play_move(Move::promotion(49, 56, target_piece));
+                let expected = Board::from_fen(&format!(
+                    "rnbqkbnr/pp1ppppp/8/1N4B1/8/3P4/P1PQPPPP/{}3KBNR w Kkq - 0 5",
+                    target_piece.fen_char()
+                ))
+                .unwrap();
+                assert!(!board.white_pieces.castle_queen);
+                assert_eq!(board, expected);
+            }
+        }
     }
 
     #[test]
@@ -1451,15 +1555,13 @@ mod test {
 
     mod move_gen {
         use crate::{
-            test::{
-                CASTLE_KING_B, CASTLE_KING_W, CASTLE_QUEEN_B, EN_PASSANT_POS_B, EN_PASSANT_POS_W,
-                MANY_POSS_MOVES_FEN_B, MANY_POSS_MOVES_FEN_W, MOST_POSS_MOVES_FEN,
-                MOST_POSS_MOVES_FEN_B,
+            test_fens::{
+                CASTLE_KING_B, CASTLE_KING_W, CASTLE_QUEEN_B, CASTLE_QUEEN_W, EN_PASSANT_POS_B,
+                EN_PASSANT_POS_W, MANY_POSS_MOVES_FEN_B, MANY_POSS_MOVES_FEN_W,
+                MOST_POSS_MOVES_FEN, MOST_POSS_MOVES_FEN_B, WHITE_PROMOTION,
             },
             Board, START_BOARD_FEN,
         };
-
-        use super::{CASTLE_QUEEN_W, WHITE_PROMOTION};
 
         #[test]
         fn correct_move_count_1() {
