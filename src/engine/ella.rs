@@ -116,6 +116,11 @@ impl EllaChess {
 
         Ok((self.best_move(), self.current_score()))
     }
+
+    pub fn stats(&mut self) -> Option<SearchStats> {
+        let search_guard = self.control.search.lock().unwrap();
+        search_guard.as_ref().map(|s| s.stats.clone())
+    }
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -152,8 +157,14 @@ impl SearchResult {
 struct Search {
     control: Arc<SearchControl>,
     transpositions: HashMap<TranspositionKey, SearchResult>,
+    stats: SearchStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchStats {
     transposition_hits: u64,
-    positons_checked: u64,
+    positions_checked: u64,
+    positions_pruned: u64,
 }
 
 impl Search {
@@ -161,15 +172,19 @@ impl Search {
         Search {
             control,
             transpositions: HashMap::new(),
-            transposition_hits: 0,
-            positons_checked: 0,
+            stats: SearchStats {
+                transposition_hits: 0,
+                positions_checked: 0,
+                positions_pruned: 0,
+            },
         }
     }
 
     fn search(mut self, board: Board, target_depth: u32) -> Result<()> {
         let control = self.control.clone();
         {
-            let result = self.search_recursive(&board, target_depth)?;
+            let result =
+                self.search_recursive(&board, 1, target_depth, f32::NEG_INFINITY, f32::INFINITY)?;
 
             *control.best_move.lock().unwrap() = result.best_move;
             control.score.store(result.score, Ordering::SeqCst);
@@ -179,16 +194,23 @@ impl Search {
         Ok(())
     }
 
-    fn search_recursive(&mut self, board: &Board, target_depth: u32) -> Result<SearchResult> {
+    fn search_recursive(
+        &mut self,
+        board: &Board,
+        depth: u32,
+        target_depth: u32,
+        mut alpha: f32,
+        beta: f32,
+    ) -> Result<SearchResult> {
         let transposition_key = TranspositionKey::new(board.zobrist_hash, target_depth);
 
-        self.positons_checked += 1;
+        self.stats.positions_checked += 1;
         if let Some(transposition) = self.transpositions.get(&transposition_key) {
-            self.transposition_hits += 1;
+            self.stats.transposition_hits += 1;
             return Ok(*transposition);
         }
 
-        if target_depth == 0 || self.control.abort_search.load(Ordering::SeqCst) {
+        if target_depth == depth || self.control.abort_search.load(Ordering::SeqCst) {
             let score = self.estimate_board(board)?;
             return Ok(SearchResult::score(score));
         }
@@ -198,9 +220,6 @@ impl Search {
             self.transpositions.insert(transposition_key, result);
             return Ok(result);
         }
-
-        let mut best_score = f32::NEG_INFINITY;
-        let mut best_move = None;
 
         let moves = board.generate_valid_moves(board.next_move);
 
@@ -212,15 +231,25 @@ impl Search {
             }
         }
 
+        let mut best_move = None;
+        let mut best_score = f32::NEG_INFINITY;
         for mve in moves {
             let mut board = board.clone();
             board.play_move(mve);
 
-            let score = self.search_recursive(&board, target_depth - 1)?.score;
+            let score = self
+                .search_recursive(&board, depth + 1, target_depth, -beta, -alpha)?
+                .score;
             let score = -score;
+            alpha = alpha.max(score);
             if score > best_score {
                 best_move = Some(mve);
                 best_score = score;
+            }
+
+            if score > beta {
+                self.stats.positions_pruned += 1;
+                break;
             }
         }
 
