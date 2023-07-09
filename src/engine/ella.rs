@@ -1,8 +1,9 @@
 use anyhow::{bail, Context};
 
 use super::{Engine, Result};
-use crate::{utils::AtomicF32, Board, Color, Move, PieceType};
+use crate::{utils::AtomicF32, Board, Color, Move, Piece, PieceType};
 use std::{
+    cmp,
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -165,6 +166,9 @@ pub struct SearchStats {
     transposition_hits: u64,
     positions_checked: u64,
     positions_pruned: u64,
+
+    #[cfg(feature = "slow-stats")]
+    max_move_count: usize,
 }
 
 impl Search {
@@ -176,6 +180,8 @@ impl Search {
                 transposition_hits: 0,
                 positions_checked: 0,
                 positions_pruned: 0,
+                #[cfg(feature = "slow-stats")]
+                max_move_count: 0,
             },
         }
     }
@@ -221,7 +227,18 @@ impl Search {
             return Ok(result);
         }
 
-        let moves = board.generate_valid_moves(board.next_move);
+        let mut moves = board.generate_valid_moves(board.next_move);
+        for mve in moves.iter_mut() {
+            mve.calculate_move_info_if_missing(board);
+        }
+        moves.sort_unstable_by(Self::compare_moves);
+
+        #[cfg(feature = "slow-stats")]
+        {
+            if self.stats.max_move_count < moves.len() {
+                self.stats.max_move_count = moves.len();
+            }
+        }
 
         if moves.is_empty() {
             if board.is_in_check(board.next_move) {
@@ -258,6 +275,58 @@ impl Search {
         Ok(result)
     }
 
+    fn compare_moves(m1: &Move, m2: &Move) -> cmp::Ordering {
+        let info1 = m1.additional_info.expect("m1.additional_info must be Some");
+        let info2 = m2.additional_info.expect("m2.additional_info must be Some");
+
+        let piece1 = info1.piece;
+        let piece2 = info2.piece;
+        debug_assert_eq!(piece1.color(), piece2.color());
+
+        if info1.is_check && !info2.is_check {
+            return cmp::Ordering::Less;
+        }
+        if !info1.is_check && info2.is_check {
+            return cmp::Ordering::Greater;
+        }
+
+        match (info1.captured_piece, info2.captured_piece) {
+            (None, None) => cmp::Ordering::Equal,
+            (None, Some(captured)) => {
+                if Self::caputure_score(piece2, captured) > 0.0 {
+                    cmp::Ordering::Less
+                } else {
+                    cmp::Ordering::Greater
+                }
+            }
+            (Some(captured), None) => {
+                if Self::caputure_score(piece1, captured) > 0.0 {
+                    cmp::Ordering::Greater
+                } else {
+                    cmp::Ordering::Less
+                }
+            }
+            (Some(captured1), Some(captured2)) => {
+                let score1 = Self::caputure_score(piece1, captured1);
+                let score2 = Self::caputure_score(piece2, captured2);
+
+                f32::partial_cmp(&score1, &score2).unwrap()
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn caputure_score(piece: Piece, captured: Piece) -> f32 {
+        debug_assert_ne!(piece.color(), captured.color());
+
+        if piece.typ() == PieceType::King {
+            return Self::piece_value(captured.typ());
+        }
+
+        Self::piece_value(captured.typ()) - Self::piece_value(piece.typ())
+    }
+
+    #[inline]
     fn estimate_board(&self, board: &Board) -> Result<f32> {
         let mut white_piece_score = 0.0;
         let mut black_piece_score = 0.0;
