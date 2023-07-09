@@ -8,6 +8,7 @@ fn main() {
     search_stats(1);
     search_stats(3);
     search_stats(5);
+    search_stats(6);
 }
 
 fn search_stats(depth: u32) {

@@ -1,17 +1,18 @@
 pub mod engine;
 pub mod utils;
+pub mod zobrist;
 
 use core::fmt;
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    collections::HashMap,
     fmt::Display,
-    hash::{Hash, Hasher},
-    mem::{self, MaybeUninit},
+    hash::Hash,
+    mem,
     num::NonZeroU8,
-    ops::{BitXorAssign, Index, IndexMut, Not},
+    ops::{Index, IndexMut, Not},
 };
 
-use rand::{thread_rng, Rng};
+use zobrist::ZobristHasher;
 
 pub const START_BOARD_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 0";
 
@@ -148,12 +149,21 @@ pub enum MoveType {
     Promotion,
 }
 
+// TODO check if memory alignment helps performance
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Move {
     pub from: u8,
     pub to: u8,
     pub promote_to: Option<Piece>,
     pub typ: MoveType,
+    pub additional_info: Option<MoveInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveInfo {
+    pub is_check: bool,
+    pub captured_piece: Option<Piece>,
+    pub piece: Piece,
 }
 
 impl Move {
@@ -163,6 +173,7 @@ impl Move {
             to,
             promote_to: None,
             typ: MoveType::Normal,
+            additional_info: None,
         }
     }
 
@@ -172,6 +183,7 @@ impl Move {
             to,
             promote_to: None,
             typ: MoveType::EnPassant,
+            additional_info: None,
         }
     }
 
@@ -181,6 +193,7 @@ impl Move {
             to,
             promote_to: None,
             typ: MoveType::Castle,
+            additional_info: None,
         }
     }
 
@@ -190,145 +203,48 @@ impl Move {
             to,
             promote_to: Some(target),
             typ: MoveType::Promotion,
+            additional_info: None,
+        }
+    }
+
+    pub fn calculate_move_info_if_missing(&mut self, board: &Board) {
+        if self.additional_info.is_none() {
+            self.additional_info = Some(MoveInfo::new_from(&self, board));
+        }
+    }
+}
+
+impl MoveInfo {
+    pub fn new_from(mve: &Move, board: &Board) -> Self {
+        let captured_piece = board[mve.to];
+        let is_check = {
+            let piece = board[mve.from].expect("mve.from needs to point to existing piece");
+
+            let moves = Vec::with_capacity(12);
+            let moves = board.generate_moves_for_piece_int(mve.to, piece, false, moves);
+
+            moves
+                .iter()
+                .map(|m| m.to)
+                .any(|pos| pos == board.piece_positions(!piece.color()).king)
+        };
+
+        MoveInfo {
+            is_check,
+            captured_piece,
+            piece: board[mve.from].unwrap(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PiecePositions {
-    #[allow(dead_code)]
-    pub color: Color,
     pub king: u8,
     pub castle_king: bool,
     pub castle_queen: bool,
 }
 
-#[derive(Clone, Hash)]
-pub struct ZobristHasherKingMoves<H> {
-    castle_king: H,
-    castle_queen: H,
-}
-
-#[derive(Clone, Hash)]
-pub struct ZobristHasher<H> {
-    black_move: H,
-    white_king: ZobristHasherKingMoves<H>,
-    black_king: ZobristHasherKingMoves<H>,
-    en_passant_col: [H; 8],
-    piece_hash: [H; 64 * 12],
-}
-
-impl<H: Hash> fmt::Debug for ZobristHasher<H> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut hasher = DefaultHasher::new();
-        self.hash(&mut hasher);
-        let hash = hasher.finish();
-        f.debug_struct("ZobristHasher")
-            .field("hash", &hash)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<H: Clone> ZobristHasher<H> {
-    fn king_move(&self, color: Color) -> ZobristHasherKingMoves<H> {
-        match color {
-            Color::White => &self.white_king,
-            Color::Black => &self.black_king,
-        }
-        .clone()
-    }
-
-    fn piece_hash(&self, pos: impl Into<usize>, piece: Piece) -> H {
-        self.piece_hash[pos.into() * piece.zobrist_index()].clone()
-    }
-
-    fn en_passant_hash(&self, pos: impl Into<usize>) -> H {
-        self.en_passant_col[pos.into() % 8].clone()
-    }
-}
-
-impl ZobristHasher<u64> {
-    fn new_random(rng: &mut impl Rng) -> Self {
-        let mut used_hashes = HashSet::new();
-        let mut rng = || loop {
-            let result = rng.next_u64();
-            if used_hashes.insert(result) {
-                break result;
-            }
-        };
-        let en_passant_row = {
-            let mut data: [MaybeUninit<u64>; 8] = unsafe { MaybeUninit::uninit().assume_init() };
-            for elem in &mut data {
-                elem.write(rng());
-            }
-            unsafe { mem::transmute(data) }
-        };
-        let piece_hash = {
-            let mut data: [MaybeUninit<u64>; 64 * 12] =
-                unsafe { MaybeUninit::uninit().assume_init() };
-            for elem in &mut data {
-                elem.write(rng());
-            }
-            unsafe { mem::transmute(data) }
-        };
-
-        Self {
-            black_move: rng(),
-            en_passant_col: en_passant_row,
-            white_king: ZobristHasherKingMoves {
-                castle_king: rng(),
-                castle_queen: rng(),
-            },
-            black_king: ZobristHasherKingMoves {
-                castle_king: rng(),
-                castle_queen: rng(),
-            },
-            piece_hash,
-        }
-    }
-}
-
-impl<H: BitXorAssign + Clone + Default> ZobristHasher<H> {
-    pub fn hash(
-        &self,
-        field: &[Option<Piece>; 64],
-        black_pos: &PiecePositions,
-        white_pos: &PiecePositions,
-        en_passant: Option<u8>,
-        next_move: Color,
-    ) -> H {
-        let mut hash = H::default();
-        if next_move == Color::Black {
-            hash ^= self.black_move.clone();
-        }
-        if let Some(en_passant) = en_passant {
-            hash ^= self.en_passant_hash(en_passant);
-        }
-        if black_pos.castle_queen {
-            hash ^= self.black_king.castle_queen.clone();
-        }
-        if black_pos.castle_king {
-            hash ^= self.black_king.castle_king.clone();
-        }
-        if white_pos.castle_queen {
-            hash ^= self.white_king.castle_queen.clone();
-        }
-        if white_pos.castle_king {
-            hash ^= self.white_king.castle_king.clone();
-        }
-
-        for (i, piece) in field.iter().enumerate() {
-            if let Some(piece) = *piece {
-                hash ^= self.piece_hash(i, piece);
-            }
-        }
-
-        hash
-    }
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Board {
     fields: [Option<Piece>; 64],
 
@@ -342,38 +258,22 @@ pub struct Board {
     pub half_moves_since_capture: u8,
     pub full_move_count: u32,
 
-    pub previous_positions: HashMap<u64, u8>,
+    pub repetition_counter: HashMap<u64, u8>,
 
     pub zobrist_hash: u64,
-    pub zobrist_hasher: ZobristHasher<u64>,
+    pub zobrist_hasher: &'static ZobristHasher<u64>,
 }
-
-impl PartialEq<Board> for Board {
-    fn eq(&self, other: &Board) -> bool {
-        // those should be all fields, except for zobrist hash and hasher
-        self.fields == other.fields
-            && self.white_pieces == other.white_pieces
-            && self.black_pieces == other.black_pieces
-            && self.next_move == other.next_move
-            && self.en_passant_square == other.en_passant_square
-            && self.half_moves_since_capture == other.half_moves_since_capture
-            && self.full_move_count == other.full_move_count
-    }
-}
-impl Eq for Board {}
 
 impl Board {
     pub fn empty() -> Self {
         Board {
             fields: [None; 64],
             white_pieces: PiecePositions {
-                color: Color::White,
                 king: 0,
                 castle_king: true,
                 castle_queen: true,
             },
             black_pieces: PiecePositions {
-                color: Color::Black,
                 king: 0,
                 castle_king: true,
                 castle_queen: true,
@@ -382,9 +282,9 @@ impl Board {
             en_passant_square: None,
             half_moves_since_capture: 0,
             full_move_count: 0,
-            previous_positions: HashMap::new(),
+            repetition_counter: HashMap::new(),
             zobrist_hash: 0,
-            zobrist_hasher: ZobristHasher::new_random(&mut thread_rng()),
+            zobrist_hasher: &zobrist::ZOBRIST_HASHER,
         }
     }
 
@@ -573,19 +473,17 @@ impl Board {
         }
 
         let white_pieces = PiecePositions {
-            color: Color::White,
             king: white_king as u8,
             castle_king: white_castle_king,
             castle_queen: white_castle_queen,
         };
         let black_pieces = PiecePositions {
-            color: Color::Black,
             king: black_king as u8,
             castle_king: black_castle_king,
             castle_queen: black_castle_queen,
         };
 
-        let zobrist_hasher = ZobristHasher::new_random(&mut thread_rng());
+        let zobrist_hasher = &zobrist::ZOBRIST_HASHER;
         let zobrist_hash = zobrist_hasher.hash(
             &fields,
             &black_pieces,
@@ -605,7 +503,7 @@ impl Board {
             en_passant_square,
             half_moves_since_capture,
             full_move_count,
-            previous_positions,
+            repetition_counter: previous_positions,
             zobrist_hash,
             zobrist_hasher,
         };
@@ -696,7 +594,7 @@ impl Board {
     }
 
     pub fn draw_by_repetition_or_50_moves(&self) -> bool {
-        if self.previous_positions[&self.zobrist_hash] >= 3 {
+        if self.repetition_counter[&self.zobrist_hash] >= 3 {
             return true;
         }
         if self.half_moves_since_capture >= 100 {
@@ -763,7 +661,7 @@ impl Board {
         for pos in 0..64u8 {
             if let Some(piece) = self[pos] {
                 if piece.color() == color {
-                    moves = self.generate_vaild_moves_for_piece_int(pos, piece, true, moves);
+                    moves = self.generate_moves_for_piece_int(pos, piece, true, moves);
                 }
             }
         }
@@ -786,7 +684,7 @@ impl Board {
         for pos in 0..64u8 {
             if let Some(piece) = self[pos] {
                 if piece.color() == color {
-                    moves = self.generate_vaild_moves_for_piece_int(pos, piece, false, moves);
+                    moves = self.generate_moves_for_piece_int(pos, piece, false, moves);
                 }
             }
         }
@@ -809,12 +707,12 @@ impl Board {
         // max moves for queen is 27, rook 14, bishop/pawn 12, king/knight 8
         // however most of the time 14 is probably good enough
         let moves = Vec::with_capacity(12);
-        let mut moves = self.generate_vaild_moves_for_piece_int(piece_at, piece, true, moves);
+        let mut moves = self.generate_moves_for_piece_int(piece_at, piece, true, moves);
         moves.retain(|m| self.is_valid_move(*m));
         moves
     }
 
-    fn generate_vaild_moves_for_piece_int(
+    fn generate_moves_for_piece_int(
         &self,
         piece_at: u8,
         piece: Piece,
@@ -1275,7 +1173,7 @@ impl Board {
         play_move_int(self, mve);
 
         let count = self
-            .previous_positions
+            .repetition_counter
             .entry(self.zobrist_hash)
             .or_insert(0);
         *count += 1;
@@ -1338,6 +1236,9 @@ pub mod test_fens {
         "rn1qkb1r/pbpppppp/1p3n2/6N1/8/6PB/PPPPPP1P/RNBQK2R b KQkq - 4 3";
     pub const CAPTURE_WHITE_QUEEN_ROOK: &str =
         "rnbqkbnr/pp1ppppp/8/1N4B1/8/3P4/PpPQPPPP/R3KBNR b KQkq - 1 4";
+    /// https://www.chessprogramming.org/Perft_Results
+    pub const POSITION_2: &str =
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 0";
 
     pub const ALL_TEST_FENS: &[&str] = &[
         START_BOARD_FEN,
@@ -1357,6 +1258,7 @@ pub mod test_fens {
         CAPTURE_BLACK_QUEEN_ROOK,
         CAPTURE_WHITE_KING_ROOK,
         CAPTURE_BLACK_QUEEN_ROOK,
+        POSITION_2,
     ];
 }
 
@@ -1420,66 +1322,94 @@ mod test {
         #[test]
         fn en_passant_white() {
             let mut board = Board::from_fen(EN_PASSANT_POS_W).unwrap();
-            board.play_move(Move::en_passant(28, 19));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("rnbqkbnr/ppp2ppp/3Pp3/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 0")
                     .unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::en_passant(28, 19));
+
             assert_eq!(board, expected);
         }
 
         #[test]
         fn en_passant_white_2() {
             let mut board = Board::from_fen(EN_PASSANT_POS_W2).unwrap();
-            board.play_move(Move::en_passant(28, 21));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("rnbqkbnr/pppp2pp/4pP2/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 0")
                     .unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::en_passant(28, 21));
+
             assert_eq!(board, expected);
         }
 
         #[test]
         fn en_passant_black() {
             let mut board = Board::from_fen(EN_PASSANT_POS_B).unwrap();
-            board.play_move(Move::en_passant(37, 46));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("rnbqkbnr/ppppp1pp/8/4P3/8/6p1/PPPP1P1P/RNBQKBNR w KQkq - 0 1")
                     .unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::en_passant(37, 46));
+
             assert_eq!(board, expected);
         }
 
         #[test]
         fn castle_queen_white() {
             let mut board = Board::from_fen(CASTLE_QUEEN_W).unwrap();
-            board.play_move(Move::castle(60, 58));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/2KR1BNR b kq - 1 0").unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::castle(60, 58));
+
             assert_eq!(board, expected);
         }
 
         #[test]
         fn castle_king_white() {
             let mut board = Board::from_fen(CASTLE_KING_W).unwrap();
-            board.play_move(Move::castle(60, 62));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQ1RK1 b kq - 1 0").unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::castle(60, 62));
+
             assert_eq!(board, expected);
         }
 
         #[test]
         fn castle_queen_black() {
             let mut board = Board::from_fen(CASTLE_QUEEN_B).unwrap();
-            board.play_move(Move::castle(4, 2));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("2kr1bnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQ - 1 1").unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::castle(4, 2));
+
             assert_eq!(board, expected);
         }
 
         #[test]
         fn castle_king_black() {
             let mut board = Board::from_fen(CASTLE_KING_B).unwrap();
-            board.play_move(Move::castle(4, 6));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("rnbq1rk1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQ - 1 1").unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::castle(4, 6));
+
             assert_eq!(board, expected);
         }
 
@@ -1488,13 +1418,18 @@ mod test {
             let board = Board::from_fen(CAPTURE_BLACK_KING_ROOK).unwrap();
             for promotion in PieceType::ALL_PROMTION_TARGETS {
                 let target_piece = Piece::new(promotion, Color::White);
-                let mut board = board.clone();
-                board.play_move(Move::promotion(14, 7, target_piece));
-                let expected = Board::from_fen(&format!(
+
+                let mut expected = Board::from_fen(&format!(
                     "rnbqk2{}/pppp1p1p/4p3/2bn4/8/8/PPPPP1PP/RNBQKBNR b KQq - 0 4",
                     target_piece.fen_char()
                 ))
                 .unwrap();
+                expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+                let mut board = board.clone();
+
+                board.play_move(Move::promotion(14, 7, target_piece));
+
                 assert!(!board.black_pieces.castle_king);
                 assert_eq!(board, expected);
             }
@@ -1503,10 +1438,14 @@ mod test {
         #[test]
         fn captured_rook_disables_castle_black_queen() {
             let mut board = Board::from_fen(CAPTURE_BLACK_QUEEN_ROOK).unwrap();
-            board.play_move(Move::new(18, 0));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("B3kbnr/p1pp1ppp/bp2p3/6q1/8/6PN/PPPPPP1P/RNBQ1RK1 b k - 0 5")
                     .unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::new(18, 0));
+
             assert!(!board.black_pieces.castle_queen);
             assert_eq!(board, expected);
         }
@@ -1514,10 +1453,14 @@ mod test {
         #[test]
         fn captured_rook_disables_castle_white_king() {
             let mut board = Board::from_fen(CAPTURE_WHITE_KING_ROOK).unwrap();
-            board.play_move(Move::new(9, 63));
-            let expected =
+
+            let mut expected =
                 Board::from_fen("rn1qkb1r/p1pppppp/1p3n2/6N1/8/6PB/PPPPPP1P/RNBQK2b w Qkq - 0 4")
                     .unwrap();
+            expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+            board.play_move(Move::new(9, 63));
+
             assert!(!board.white_pieces.castle_king);
             assert_eq!(board, expected);
         }
@@ -1528,12 +1471,16 @@ mod test {
             for promotion in PieceType::ALL_PROMTION_TARGETS {
                 let target_piece = Piece::new(promotion, Color::White);
                 let mut board = board.clone();
-                board.play_move(Move::promotion(49, 56, target_piece));
-                let expected = Board::from_fen(&format!(
+
+                let mut expected = Board::from_fen(&format!(
                     "rnbqkbnr/pp1ppppp/8/1N4B1/8/3P4/P1PQPPPP/{}3KBNR w Kkq - 0 5",
                     target_piece.fen_char()
                 ))
                 .unwrap();
+                expected.repetition_counter.insert(board.zobrist_hash, 1);
+
+                board.play_move(Move::promotion(49, 56, target_piece));
+
                 assert!(!board.white_pieces.castle_queen);
                 assert_eq!(board, expected);
             }
@@ -1545,11 +1492,11 @@ mod test {
         for fen in ALL_TEST_FENS {
             let board = Board::from_fen(fen).unwrap();
             for mve in board.generate_valid_moves(board.next_move) {
-                let mut clone = board.clone();
-                clone.play_move(mve);
+                let mut board = board.clone();
+                board.play_move(mve);
                 assert_eq!(
-                    clone.zobrist_hash,
-                    clone.calculate_zobrist_hash(),
+                    board.zobrist_hash,
+                    board.calculate_zobrist_hash(),
                     "\nZobrist hash failed for move {mve:?} at fen \"{fen}\""
                 );
             }
@@ -1561,7 +1508,7 @@ mod test {
             test_fens::{
                 CASTLE_KING_B, CASTLE_KING_W, CASTLE_QUEEN_B, CASTLE_QUEEN_W, EN_PASSANT_POS_B,
                 EN_PASSANT_POS_W, MANY_POSS_MOVES_FEN_B, MANY_POSS_MOVES_FEN_W,
-                MOST_POSS_MOVES_FEN, MOST_POSS_MOVES_FEN_B, WHITE_PROMOTION,
+                MOST_POSS_MOVES_FEN, MOST_POSS_MOVES_FEN_B, POSITION_2, WHITE_PROMOTION,
             },
             Board, START_BOARD_FEN,
         };
@@ -1654,6 +1601,77 @@ mod test {
         fn correct_move_count_promotion() {
             let board = Board::from_fen(WHITE_PROMOTION).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 43);
+        }
+
+        fn count_moves(board: &Board, depth: u32) -> u64 {
+            if depth == 0 {
+                return 1;
+            }
+            let mut count = 0;
+
+            let moves = board.generate_valid_moves(board.next_move);
+            for mve in moves {
+                let mut board = board.clone();
+                board.play_move(mve);
+
+                count += count_moves(&board, depth - 1);
+            }
+            count
+        }
+
+        #[test]
+        #[ignore = "slow test"]
+        fn count_moves_from_start() {
+            let board = Board::from_fen(START_BOARD_FEN).unwrap();
+
+            let depth_to_count: &[(u32, u64)] = &[
+                (0, 1),
+                (1, 20),
+                (2, 400),
+                (3, 8902),
+                (4, 197281),
+                // (5, 4865609),
+                // (6, 119060324),
+                // (7, 3195901860),
+                // (8, 84998978956),
+                // (9, 2439530234167),
+            ];
+
+            println!("Count moves from start position:");
+            for (depth, count) in depth_to_count {
+                assert_eq!(
+                    count_moves(&board, *depth),
+                    *count,
+                    "Count from START for depth {depth} should be {count}"
+                );
+                println!("\t depth: {depth} => {count}");
+            }
+        }
+
+        #[test]
+        // #[ignore = "slow test"] // TODO set ignore once this is no longer failing
+        fn count_moves_from_position_2() {
+            let board = Board::from_fen(POSITION_2).unwrap();
+
+            let depth_to_count: &[(u32, u64)] = &[
+                (0, 1),
+                (1, 48),
+                (2, 2039),
+                (3, 97862),
+                (4, 4085603),
+                // (5, 197281),
+                // (6, 8031647685),
+            ];
+
+            println!("Count moves from position 2:");
+            for (depth, count) in depth_to_count {
+                assert_eq!(
+                    count_moves(&board, *depth),
+                    *count,
+                    "Count from POSITION_2 for depth {depth} should be {count}"
+                );
+                println!("\t depth: {depth} => {count}");
+            }
         }
     }
 }

@@ -248,6 +248,7 @@ dependencies = [
  "criterion",
  "iced",
  "iced_native",
+ "lazy_static",
  "rand",
 ]
 
