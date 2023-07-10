@@ -1,6 +1,4 @@
-use crate::{Board, Move};
-
-pub type Result<T> = std::result::Result<T, anyhow::Error>;
+use crate::{Board, Move, Result};
 
 pub trait Engine {
     /// creates a new engine in the given position

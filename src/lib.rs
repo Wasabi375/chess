@@ -12,7 +12,10 @@ use std::{
     ops::{Index, IndexMut, Not},
 };
 
+use anyhow::{bail, ensure, Context};
 use zobrist::ZobristHasher;
+
+pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 pub const START_BOARD_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 0";
 
@@ -177,6 +180,32 @@ impl Move {
         }
     }
 
+    pub fn new_in_board(from: u8, to: u8, board: &Board) -> Self {
+        let piece = board[from].unwrap();
+
+        match piece.typ() {
+            PieceType::King => {
+                if from.abs_diff(to) == 2 {
+                    Self::castle(from, to)
+                } else {
+                    Self::new(from, to)
+                }
+            }
+            PieceType::Pawn => {
+                if let Some(en_passant_square) = board.en_passant_square {
+                    if en_passant_square == to {
+                        Self::en_passant(from, to)
+                    } else {
+                        Self::new(from, to)
+                    }
+                } else {
+                    Self::new(from, to)
+                }
+            }
+            _ => Self::new(from, to),
+        }
+    }
+
     pub fn en_passant(from: u8, to: u8) -> Self {
         Move {
             from,
@@ -255,13 +284,27 @@ pub struct Board {
 
     pub en_passant_square: Option<u8>,
 
-    pub half_moves_since_capture: u8,
+    pub half_moves_since_capture_or_pawn_move: u8,
     pub full_move_count: u32,
 
     pub repetition_counter: HashMap<u64, u8>,
 
     pub zobrist_hash: u64,
     pub zobrist_hasher: &'static ZobristHasher<u64>,
+}
+
+struct BoardUndoSaveState {
+    zobrist_hash: u64,
+    en_passant_square: Option<u8>,
+    half_moves_since_capture: u8,
+    white_castle_king: bool,
+    white_castle_queen: bool,
+    black_castle_king: bool,
+    black_castle_queen: bool,
+    /// The piece captured by the move that is associated with this undo state
+    /// If the move is an EnPassant, this should be `None` and is assumed to be
+    /// a enemy pawn
+    captured_piece: Option<Piece>,
 }
 
 impl Board {
@@ -280,7 +323,7 @@ impl Board {
             },
             next_move: Color::White,
             en_passant_square: None,
-            half_moves_since_capture: 0,
+            half_moves_since_capture_or_pawn_move: 0,
             full_move_count: 0,
             repetition_counter: HashMap::new(),
             zobrist_hash: 0,
@@ -288,7 +331,7 @@ impl Board {
         }
     }
 
-    pub fn from_fen(fen: &str) -> Result<Self, String> {
+    pub fn from_fen(fen: &str) -> Result<Self> {
         let mut fields = [None; 64];
 
         let mut idx = 0;
@@ -302,7 +345,7 @@ impl Board {
         for char in &mut iter {
             if idx == 64 {
                 if char != ' ' {
-                    return Err("Expected ' ' after pieces".to_string());
+                    bail!("Expected ' ' after pieces".to_string());
                 }
                 break;
             }
@@ -375,21 +418,21 @@ impl Board {
                 }
                 '/' => {
                     if idx % 8 != 0 {
-                        return Err("'/' must come between 2 lines".to_string());
+                        bail!("'/' must come between 2 lines".to_string());
                     }
                 }
-                _ => return Err(format!("unexpected '{char}' instead of piece")),
+                _ => bail!(format!("unexpected '{char}' instead of piece")),
             }
         }
 
         let next_move = match iter.next() {
             Some('b') => Color::Black,
             Some('w') => Color::White,
-            _ => return Err("Expected either 'w' or 'b' to move".to_string()),
+            _ => bail!("Expected either 'w' or 'b' to move".to_string()),
         };
 
         if iter.next() != Some(' ') {
-            return Err("Expected ' ' after move color".to_string());
+            bail!("Expected ' ' after move color".to_string());
         }
 
         let mut white_castle_king: bool = false;
@@ -401,7 +444,7 @@ impl Board {
             match iter.next() {
                 Some('-') => {
                     if iter.next() != Some(' ') {
-                        return Err("Expected ' ' after '-' for castling".to_string());
+                        bail!("Expected ' ' after '-' for castling".to_string());
                     }
                     break;
                 }
@@ -410,43 +453,33 @@ impl Board {
                 Some('K') => white_castle_king = true,
                 Some('Q') => white_castle_queen = true,
                 Some(' ') => break,
-                c => return Err(format!("Expected castling availability but got {c:?}")),
+                c => bail!(format!("Expected castling availability but got {c:?}")),
             }
         }
 
         let en_passant_square = {
             let col = iter.next();
             if col.is_none() {
-                return Err("Expected en-passant".to_string());
+                bail!("Expected en-passant".to_string());
             }
             let col = col.unwrap();
             if col != '-' {
-                if !('a'..='h').contains(&col) {
-                    return Err(format!("Expected 'a-h' for en-passant, got '{col}'"));
-                }
-                let col = col as u32 - 'a' as u32;
-
                 let row = iter.next();
                 if row.is_none() {
-                    return Err("Expected en-passant row".to_string());
+                    bail!("Expected en-passant row".to_string());
                 }
                 let row = row.unwrap();
-                if !('1'..='8').contains(&row) {
-                    return Err("Expected '1-8' for en-passant row".to_string());
-                }
-                let row = row as u32 - '1' as u32;
 
-                let idx = col * 8 + row;
-                assert!(idx < 64);
+                let square = format!("{}{}", col, row);
 
-                Some(((7 - row) * 8 + col) as u8)
+                Some(Self::square_name_to_pos(&square)?)
             } else {
                 None
             }
         };
 
         if iter.next() != Some(' ') {
-            return Err("Expected ' ' after en-passant".to_string());
+            bail!("Expected ' ' after en-passant".to_string());
         }
 
         let clocks_str: String = iter.collect();
@@ -455,21 +488,19 @@ impl Board {
         let half_moves_since_capture: u8 = if let Some(half_moves) = clocks.next() {
             half_moves
                 .parse()
-                .map_err(|_| "Could not parse half-move-count".to_string())?
+                .context("Could not parse half-move-count")?
         } else {
-            return Err("expected half move count".to_string());
+            bail!("expected half move count".to_string());
         };
 
         let full_move_count: u32 = if let Some(full_moves) = clocks.next() {
-            full_moves
-                .parse()
-                .map_err(|_| "Could not parse move-count".to_string())?
+            full_moves.parse().context("Could not parse move-count")?
         } else {
-            return Err("Expected move count".to_string());
+            bail!("Expected move count".to_string());
         };
 
         if clocks.next().is_some() {
-            return Err("Expected end of FEN".to_string());
+            bail!("Expected end of FEN".to_string());
         }
 
         let white_pieces = PiecePositions {
@@ -501,7 +532,7 @@ impl Board {
             black_pieces,
             next_move,
             en_passant_square,
-            half_moves_since_capture,
+            half_moves_since_capture_or_pawn_move: half_moves_since_capture,
             full_move_count,
             repetition_counter: previous_positions,
             zobrist_hash,
@@ -509,6 +540,23 @@ impl Board {
         };
 
         Ok(board)
+    }
+
+    pub fn square_name_to_pos(square: &str) -> Result<u8> {
+        ensure!(square.chars().count() == 2);
+
+        let mut chars = square.chars();
+
+        let col = chars.next().unwrap();
+        let row = chars.next().unwrap();
+
+        ensure!(('a'..='h').contains(&col));
+        let col = col as u32 - 'a' as u32;
+
+        ensure!(('1'..='8').contains(&row));
+        let row = row as u32 - '1' as u32;
+
+        Ok(((7 - row) * 8 + col) as u8)
     }
 
     pub fn calculate_zobrist_hash(&self) -> u64 {
@@ -586,7 +634,7 @@ impl Board {
         }
         fen.push(' ');
 
-        fen.push_str(&self.half_moves_since_capture.to_string());
+        fen.push_str(&self.half_moves_since_capture_or_pawn_move.to_string());
         fen.push(' ');
         fen.push_str(&self.full_move_count.to_string());
 
@@ -597,13 +645,13 @@ impl Board {
         if self.repetition_counter[&self.zobrist_hash] >= 3 {
             return true;
         }
-        if self.half_moves_since_capture >= 100 {
+        if self.half_moves_since_capture_or_pawn_move >= 100 {
             return true;
         }
         false
     }
 
-    pub fn winner(&self) -> Option<Option<Color>> {
+    pub fn winner(&mut self) -> Option<Option<Color>> {
         let valid_moves = self.generate_valid_moves(self.next_move);
         if valid_moves.is_empty() {
             if self.is_in_check(self.next_move) {
@@ -642,15 +690,17 @@ impl Board {
     /// Checks if a given move is valid. This does ignore [Board.next_move] and
     /// instead pretends that it is temporarialy set to the color of the piece
     /// in `mve`.
-    pub fn is_valid_move(&self, mve: Move) -> bool {
+    pub fn is_valid_move(&mut self, mve: Move) -> bool {
         if let Some(piece) = self[mve.from] {
             let color = piece.color();
+            let orig_color = self.next_move;
 
-            let mut clone = self.clone();
             // NOTE: play asserts the color is matching
-            clone.next_move = color;
-            clone.play_move(mve);
-            !clone.is_in_check(color)
+            self.next_move = color;
+            let in_check = self.with_temp_move(mve, |board| board.is_in_check(color));
+            self.next_move = orig_color;
+
+            !in_check
         } else {
             false
         }
@@ -668,7 +718,7 @@ impl Board {
         moves
     }
 
-    pub fn generate_valid_moves(&self, color: Color) -> Vec<Move> {
+    pub fn generate_valid_moves(&mut self, color: Color) -> Vec<Move> {
         if self.draw_by_repetition_or_50_moves() {
             return vec![];
         }
@@ -691,7 +741,7 @@ impl Board {
         moves
     }
 
-    pub fn generate_valid_moves_for_piece(&self, piece_at: u8) -> Vec<Move> {
+    pub fn generate_valid_moves_for_piece(&mut self, piece_at: u8) -> Vec<Move> {
         if self.draw_by_repetition_or_50_moves() {
             return vec![];
         }
@@ -875,9 +925,9 @@ impl Board {
         search(x - 1, y);
 
         if allow_castle {
-            let castle_row = match color {
-                Color::White => 7,
-                Color::Black => 0,
+            let (castle_row, pawn_row) = match color {
+                Color::White => (7, 6),
+                Color::Black => (0, 1),
             };
 
             let bidx = |x, y| (y * 8 + x) as u8;
@@ -895,20 +945,33 @@ impl Board {
                 return moves;
             }
 
+            // HACK: generate_attacking moves does not generate attack moves
+            // for pawns to empty squares. Therefor we have to manually detect,
+            // if an enemy pawn blocks promotion
+            if let Some(piece_in_front_of_king) = self[bidx(4, pawn_row)] {
+                if piece_in_front_of_king.typ() == PieceType::Pawn
+                    && piece_in_front_of_king.color() != color
+                {
+                    return moves;
+                }
+            }
+
             let enemy_moves = self.generate_attacking_moves(!color);
 
             if castle_king
-                && !enemy_moves
-                    .iter()
-                    .any(|m| m.to == bidx(5, castle_row) || m.to == bidx(6, castle_row))
+                && !enemy_moves.iter().any(|m| {
+                    m.to == bidx(4, castle_row)
+                        || m.to == bidx(5, castle_row)
+                        || m.to == bidx(6, castle_row)
+                })
             {
                 moves.push(Move::castle(piece_at, bidx(6, castle_row)));
             }
             if castle_queen
                 && !enemy_moves.iter().any(|m| {
-                    m.to == bidx(1, castle_row)
-                        || m.to == bidx(2, castle_row)
+                    m.to == bidx(2, castle_row)
                         || m.to == bidx(3, castle_row)
+                        || m.to == bidx(4, castle_row)
                 })
             {
                 moves.push(Move::castle(piece_at, bidx(2, castle_row)));
@@ -981,202 +1044,446 @@ impl Board {
 
     /// plays a given move. This assumes that the move is valid
     pub fn play_move(&mut self, mve: Move) {
-        /// plays a given move. This assumes that the move is valid
-        fn play_move_int(slf: &mut Board, mve: Move) {
-            debug_assert!(slf[mve.from].is_some());
-            debug_assert_eq!(slf[mve.from].unwrap().color(), slf.next_move);
+        debug_assert!(self[mve.from].is_some());
+        debug_assert_eq!(self[mve.from].unwrap().color(), self.next_move);
 
-            // toggle color for next move
-            slf.next_move = !slf.next_move;
-            slf.zobrist_hash ^= slf.zobrist_hasher.black_move;
+        let zobrist_hasher = self.zobrist_hasher;
 
-            if slf.next_move == Color::White {
-                slf.full_move_count += 1;
-            }
+        self.next_move = !self.next_move;
+        if self.next_move == Color::White {
+            self.full_move_count += 1;
+        }
+        self.zobrist_hash ^= zobrist_hasher.black_move;
 
-            if mve.typ == MoveType::EnPassant {
-                assert!(slf.en_passant_square.is_some());
-                let en_passant = slf.en_passant_square.unwrap();
+        self.half_moves_since_capture_or_pawn_move += 1;
 
-                slf.en_passant_square = None;
-                slf.zobrist_hash ^= slf.zobrist_hasher.en_passant_hash(en_passant);
+        match mve.typ {
+            MoveType::Normal => {
+                let piece = self[mve.from].unwrap();
+                let captured = self[mve.to];
 
-                slf[mve.to] = slf[mve.from];
-                slf[mve.from] = None;
+                // clear out old position
+                self[mve.from] = None;
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.from, piece);
 
-                let pawn = slf[mve.to].unwrap();
-                debug_assert_eq!(pawn.typ(), PieceType::Pawn);
-                slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.from, pawn);
-                slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.to, pawn);
+                // remove captured from hash
+                if let Some(captured) = captured {
+                    debug_assert_ne!(captured.color(), piece.color());
+                    self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.to, captured);
 
-                let en_passant_col = en_passant % 8;
-                let en_passant_row = mve.from / 8;
-                let en_passant_idx = en_passant_col + en_passant_row * 8;
+                    // disable castling if captured piece is rook
+                    let mut hash_update = 0;
+                    if mve.to == 0 && captured.color() == Color::Black {
+                        if self.black_pieces.castle_queen {
+                            hash_update ^= zobrist_hasher.black_king.castle_queen;
+                            self.black_pieces.castle_queen = false;
+                        }
+                    } else if mve.to == 7 && captured.color() == Color::Black {
+                        if self.black_pieces.castle_king {
+                            hash_update ^= zobrist_hasher.black_king.castle_king;
+                            self.black_pieces.castle_king = false;
+                        }
+                    } else if mve.to == 56 && captured.color() == Color::White {
+                        if self.white_pieces.castle_queen {
+                            hash_update ^= zobrist_hasher.white_king.castle_queen;
+                            self.white_pieces.castle_queen = false;
+                        }
+                    } else if mve.to == 63 && captured.color() == Color::White {
+                        if self.white_pieces.castle_king {
+                            hash_update ^= zobrist_hasher.white_king.castle_king;
+                            self.white_pieces.castle_king = false;
+                        }
+                    }
 
-                if let Some(captured) = slf[en_passant_idx] {
-                    debug_assert_eq!(captured.typ(), PieceType::Pawn);
-                    slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(en_passant_idx, captured);
+                    self.zobrist_hash ^= hash_update;
+
+                    self.half_moves_since_capture_or_pawn_move = 0;
                 }
-                slf[en_passant_idx] = None;
 
-                slf.half_moves_since_capture = 0;
+                // move piece into new positon
+                self[mve.to] = Some(piece);
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.to, piece);
 
-                return;
+                // disable en_passant
+                if let Some(old_en_passant) = self.en_passant_square {
+                    self.zobrist_hash ^= self.zobrist_hasher.en_passant_hash(old_en_passant);
+                }
+                self.en_passant_square = None;
+
+                // update castling rights and piece positions and reenable en_passant
+                match piece.typ() {
+                    PieceType::King => {
+                        let king_hasher = zobrist_hasher.king_move(piece.color());
+                        let piece_positions = self.piece_positions_mut(piece.color());
+                        let mut hash_update = 0;
+                        piece_positions.king = mve.to;
+                        if piece_positions.castle_king {
+                            hash_update ^= king_hasher.castle_king;
+                            piece_positions.castle_king = false;
+                        }
+                        if piece_positions.castle_queen {
+                            hash_update ^= king_hasher.castle_queen;
+                            piece_positions.castle_queen = false;
+                        }
+
+                        self.zobrist_hash ^= hash_update;
+                    }
+                    PieceType::Rook => {
+                        let mut hash_update = 0;
+                        if mve.from == 0 && piece.color() == Color::Black {
+                            if self.black_pieces.castle_queen {
+                                hash_update ^= zobrist_hasher.black_king.castle_queen;
+                                self.black_pieces.castle_queen = false;
+                            }
+                        } else if mve.from == 7 && piece.color() == Color::Black {
+                            if self.black_pieces.castle_king {
+                                hash_update ^= zobrist_hasher.black_king.castle_king;
+                                self.black_pieces.castle_king = false;
+                            }
+                        } else if mve.from == 56 && piece.color() == Color::White {
+                            if self.white_pieces.castle_queen {
+                                hash_update ^= zobrist_hasher.white_king.castle_queen;
+                                self.white_pieces.castle_queen = false;
+                            }
+                        } else if mve.from == 63 && piece.color() == Color::White {
+                            if self.white_pieces.castle_king {
+                                hash_update ^= zobrist_hasher.white_king.castle_king;
+                                self.white_pieces.castle_king = false;
+                            }
+                        }
+
+                        self.zobrist_hash ^= hash_update;
+                    }
+                    PieceType::Pawn => {
+                        self.half_moves_since_capture_or_pawn_move = 0;
+
+                        // if pawn moved 2 squares, update en_passant
+                        if mve.from.abs_diff(mve.to) == 16 {
+                            self.en_passant_square = Some(
+                                (mve.from as i16 + (mve.to as i16 - mve.from as i16) / 2) as u8,
+                            );
+                            self.zobrist_hash ^=
+                                zobrist_hasher.en_passant_hash(self.en_passant_square.unwrap());
+                        }
+                    }
+                    _ => (),
+                }
             }
+            MoveType::Castle => {
+                let king = self[mve.from].unwrap();
+                debug_assert_eq!(king.typ(), PieceType::King);
 
-            if mve.typ == MoveType::Castle {
-                let castle_king = mve.to == (mve.from + 2);
-                let (rook_from, rook_to) = if castle_king {
-                    (mve.to + 1, mve.to - 1)
-                } else {
-                    (mve.to - 2, mve.to + 1)
+                let (rook_from, rook_to): (u8, u8) = match mve.to {
+                    2 => {
+                        debug_assert_eq!(king.color(), Color::Black);
+                        (0, 3)
+                    }
+                    6 => {
+                        debug_assert_eq!(king.color(), Color::Black);
+                        (7, 5)
+                    }
+                    58 => {
+                        debug_assert_eq!(king.color(), Color::White);
+                        (56, 59)
+                    }
+                    62 => {
+                        debug_assert_eq!(king.color(), Color::White);
+                        (63, 61)
+                    }
+                    _ => panic!("castling only possible targeting 4 specific squares"),
                 };
 
-                let king = slf[mve.from].unwrap();
-                let rook = slf[rook_from].unwrap();
+                let rook = self[rook_from].unwrap();
+                debug_assert_eq!(rook.color(), king.color());
 
-                debug_assert_eq!(rook.typ(), PieceType::Rook);
+                // disabling castling, you can only castle once after all
+                {
+                    let piece_positions = self.piece_positions_mut(king.color());
+                    let king_hasher = zobrist_hasher.king_move(king.color());
 
-                // move king
-                slf[mve.to] = slf[mve.from];
-                slf[mve.from] = None;
-                slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.from, king);
-                slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.to, king);
-
-                // move rook
-                slf[rook_to] = slf[rook_from];
-                slf[rook_from] = None;
-                slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(rook_from, rook);
-                slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(rook_to, rook);
-
-                if let Some(en_passant_square) = slf.en_passant_square {
-                    slf.zobrist_hash ^= slf.zobrist_hasher.en_passant_hash(en_passant_square);
-                }
-                slf.en_passant_square = None;
-
-                let zobrist_king_hasher = slf.zobrist_hasher.king_move(king.color());
-                if slf.piece_positions(king.color()).castle_queen {
-                    slf.zobrist_hash ^= zobrist_king_hasher.castle_queen;
-                }
-                if slf.piece_positions(king.color()).castle_king {
-                    slf.zobrist_hash ^= zobrist_king_hasher.castle_king;
-                }
-                slf.piece_positions_mut(king.color()).castle_queen = false;
-                slf.piece_positions_mut(king.color()).castle_king = false;
-                slf.piece_positions_mut(king.color()).king = mve.to;
-
-                slf.half_moves_since_capture += 1;
-                return;
-            }
-
-            if let Some(caputred) = slf[mve.to] {
-                slf.half_moves_since_capture = 0;
-                slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.to, caputred);
-
-                if caputred.typ() == PieceType::Rook {
-                    match mve.to {
-                        0 => {
-                            if slf.black_pieces.castle_queen {
-                                slf.zobrist_hash ^= slf.zobrist_hasher.black_king.castle_queen;
-                            }
-                            slf.black_pieces.castle_queen = false
-                        }
-                        7 => {
-                            if slf.black_pieces.castle_king {
-                                slf.zobrist_hash ^= slf.zobrist_hasher.black_king.castle_king;
-                            }
-                            slf.black_pieces.castle_king = false
-                        }
-                        56 => {
-                            if slf.white_pieces.castle_queen {
-                                slf.zobrist_hash ^= slf.zobrist_hasher.white_king.castle_queen;
-                            }
-                            slf.white_pieces.castle_queen = false
-                        }
-                        63 => {
-                            if slf.white_pieces.castle_king {
-                                slf.zobrist_hash ^= slf.zobrist_hasher.white_king.castle_king;
-                            }
-                            slf.white_pieces.castle_king = false
-                        }
-                        _ => {}
+                    let mut hash_update = 0;
+                    if piece_positions.castle_king {
+                        piece_positions.castle_king = false;
+                        hash_update ^= king_hasher.castle_king;
                     }
-                }
-            } else {
-                slf.half_moves_since_capture += 1;
-            }
-
-            if mve.typ == MoveType::Promotion {
-                assert!(mve.promote_to.is_some());
-                slf[mve.to] = mve.promote_to;
-            } else {
-                slf[mve.to] = slf[mve.from];
-            }
-            let old_piece = slf[mve.from].unwrap();
-            slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.from, old_piece);
-            slf[mve.from] = None;
-
-            if old_piece.typ() == PieceType::Pawn {
-                slf.half_moves_since_capture = 0;
-            }
-
-            // piece might be different from old pice, because of possible promotion
-            let piece = slf[mve.to].unwrap();
-            slf.zobrist_hash ^= slf.zobrist_hasher.piece_hash(mve.to, piece);
-
-            let zobrist_king_hasher = slf.zobrist_hasher.king_move(piece.color());
-            match piece.typ() {
-                PieceType::King => {
-                    slf.piece_positions_mut(piece.color()).king = mve.to;
-                    if slf.piece_positions(piece.color()).castle_queen {
-                        slf.zobrist_hash ^= zobrist_king_hasher.castle_queen;
+                    if piece_positions.castle_queen {
+                        piece_positions.castle_queen = false;
+                        hash_update ^= king_hasher.castle_queen;
                     }
-                    slf.piece_positions_mut(piece.color()).castle_queen = false;
-                    if slf.piece_positions(piece.color()).castle_king {
-                        slf.zobrist_hash ^= zobrist_king_hasher.castle_king;
-                    }
-                    slf.piece_positions_mut(piece.color()).castle_king = false;
+                    self.zobrist_hash ^= hash_update;
                 }
-                PieceType::Rook => {
-                    let col = mve.from % 8;
-                    let row = mve.from / 8;
-                    let start_row = if piece.color() == Color::White { 7 } else { 0 };
-                    if row == start_row {
-                        if col == 0 {
-                            if slf.piece_positions(piece.color()).castle_queen {
-                                slf.zobrist_hash ^= zobrist_king_hasher.castle_queen;
-                            }
-                            slf.piece_positions_mut(piece.color()).castle_queen = false;
+
+                // disable en_passant
+                if let Some(old_en_passant) = self.en_passant_square {
+                    self.zobrist_hash ^= self.zobrist_hasher.en_passant_hash(old_en_passant);
+                }
+                self.en_passant_square = None;
+
+                // remove king from old square
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.from, king);
+                self[mve.from] = None;
+
+                // remvoe rook from old square
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(rook_from, rook);
+                self[rook_from] = None;
+
+                // move king to new position
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.to, king);
+                self[mve.to] = Some(king);
+                self.piece_positions_mut(king.color()).king = mve.to;
+
+                // move the rook to new position
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(rook_to, rook);
+                self[rook_to] = Some(rook);
+            }
+            MoveType::EnPassant => {
+                let pawn = self[mve.from].unwrap();
+                debug_assert_eq!(pawn.typ(), PieceType::Pawn);
+                debug_assert!(self.en_passant_square.is_some());
+                debug_assert_eq!(mve.to, self.en_passant_square.unwrap());
+
+                let capture_pos = if pawn.color() == Color::White {
+                    mve.to + 8
+                } else {
+                    mve.to - 8
+                };
+                let captured_pawn =
+                    self[capture_pos].expect("EnPassant must always capture a piece");
+                debug_assert_eq!(captured_pawn.typ(), PieceType::Pawn);
+                debug_assert_ne!(captured_pawn.color(), pawn.color());
+
+                // remove captured pawn
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(capture_pos, captured_pawn);
+                self[capture_pos] = None;
+
+                // remove pawn from old pos
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.from, pawn);
+                self[mve.from] = None;
+
+                // move pawn to new pos
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.to, pawn);
+                self[mve.to] = Some(pawn);
+
+                // disable en_passant
+                if let Some(old_en_passant) = self.en_passant_square {
+                    self.zobrist_hash ^= self.zobrist_hasher.en_passant_hash(old_en_passant);
+                }
+                self.en_passant_square = None;
+
+                self.half_moves_since_capture_or_pawn_move = 0;
+            }
+            MoveType::Promotion => {
+                let piece = self[mve.from].unwrap();
+                let captured = self[mve.to];
+                let promote_to = mve
+                    .promote_to
+                    .expect("Promotion move needs promotion target");
+                debug_assert_eq!(piece.color(), promote_to.color());
+
+                // clear out old position
+                self[mve.from] = None;
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.from, piece);
+
+                // remove captured from hash
+                if let Some(captured) = captured {
+                    debug_assert_ne!(captured.color(), piece.color());
+                    self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.to, captured);
+
+                    // disable castling if captured piece is rook
+                    let mut hash_update = 0;
+                    if mve.to == 0 && captured.color() == Color::Black {
+                        if self.black_pieces.castle_queen {
+                            hash_update ^= zobrist_hasher.black_king.castle_queen;
+                            self.black_pieces.castle_queen = false;
                         }
-                        if col == 7 {
-                            if slf.piece_positions(piece.color()).castle_king {
-                                slf.zobrist_hash ^= zobrist_king_hasher.castle_king;
-                            }
-                            slf.piece_positions_mut(piece.color()).castle_king = false;
+                    } else if mve.to == 7 && captured.color() == Color::Black {
+                        if self.black_pieces.castle_king {
+                            hash_update ^= zobrist_hasher.black_king.castle_king;
+                            self.black_pieces.castle_king = false;
+                        }
+                    } else if mve.to == 56 && captured.color() == Color::White {
+                        if self.white_pieces.castle_queen {
+                            hash_update ^= zobrist_hasher.white_king.castle_queen;
+                            self.white_pieces.castle_queen = false;
+                        }
+                    } else if mve.to == 63 && captured.color() == Color::White {
+                        if self.white_pieces.castle_king {
+                            hash_update ^= zobrist_hasher.white_king.castle_king;
+                            self.white_pieces.castle_king = false;
                         }
                     }
+
+                    self.zobrist_hash ^= hash_update;
                 }
-                _ => {}
-            }
 
-            if let Some(old_en_passant) = slf.en_passant_square {
-                slf.zobrist_hash ^= slf.zobrist_hasher.en_passant_hash(old_en_passant);
-            }
+                // move piece into new positon
+                self[mve.to] = Some(promote_to);
+                self.zobrist_hash ^= zobrist_hasher.piece_hash(mve.to, promote_to);
 
-            if piece.typ() == PieceType::Pawn && mve.to.abs_diff(mve.from) == 16 {
-                slf.en_passant_square = Some(mve.to.min(mve.from) + 8);
-                slf.zobrist_hash ^= slf.zobrist_hasher.en_passant_hash(mve.from);
-            } else {
-                slf.en_passant_square = None;
+                // disable en_passant
+                if let Some(old_en_passant) = self.en_passant_square {
+                    self.zobrist_hash ^= self.zobrist_hasher.en_passant_hash(old_en_passant);
+                }
+                self.en_passant_square = None;
+
+                self.half_moves_since_capture_or_pawn_move = 0;
             }
         }
-        play_move_int(self, mve);
 
-        let count = self
+        *self
             .repetition_counter
             .entry(self.zobrist_hash)
-            .or_insert(0);
-        *count += 1;
+            .or_insert(0) += 1;
+    }
+
+    pub fn with_temp_move<F, R>(&mut self, mve: Move, func: F) -> R
+    where
+        F: FnOnce(&mut Board) -> R,
+    {
+        let captured = self[mve.to];
+        let save_state = self.create_undo_save_state(captured);
+        self.play_move(mve);
+
+        let result = func(self);
+
+        self.undo_move(mve, save_state);
+
+        result
+    }
+
+    #[inline]
+    fn undo_move(&mut self, mve: Move, save_state: BoardUndoSaveState) {
+        // decrement repetition counter of the move we undo
+        *self.repetition_counter.get_mut(&self.zobrist_hash).unwrap() -= 1;
+
+        // undo next_move change
+        self.next_move = !self.next_move;
+        if self.next_move == Color::Black {
+            self.full_move_count -= 1;
+        }
+
+        match mve.typ {
+            MoveType::Normal => {
+                let piece = self[mve.to].unwrap();
+
+                debug_assert_ne!(
+                    save_state
+                        .captured_piece
+                        .map(|p| p.color())
+                        .unwrap_or_else(|| !piece.color()),
+                    piece.color()
+                );
+
+                // move piece to original position
+                self[mve.from] = Some(piece);
+
+                // clear out piece or change back to captured
+                self[mve.to] = save_state.captured_piece;
+
+                // update king position
+                if piece.typ() == PieceType::King {
+                    self.piece_positions_mut(piece.color()).king = mve.from;
+                }
+            }
+            MoveType::Castle => {
+                let king = self[mve.to].unwrap();
+                let (rook_from, rook_to): (u8, u8) = match mve.to {
+                    2 => {
+                        debug_assert_eq!(king.color(), Color::Black);
+                        (0, 3)
+                    }
+                    6 => {
+                        debug_assert_eq!(king.color(), Color::Black);
+                        (7, 5)
+                    }
+                    58 => {
+                        debug_assert_eq!(king.color(), Color::White);
+                        (56, 59)
+                    }
+                    62 => {
+                        debug_assert_eq!(king.color(), Color::White);
+                        (63, 61)
+                    }
+                    _ => panic!("castling only possible targeting 4 specific squares"),
+                };
+                let rook = self[rook_to].unwrap();
+                debug_assert_eq!(rook.color(), king.color());
+
+                // remove king
+                self[mve.to] = None;
+
+                // remove rook
+                self[rook_to] = None;
+
+                // put back king to original position
+                self[mve.from] = Some(king);
+                self.piece_positions_mut(king.color()).king = mve.from;
+
+                // put back rook to original position
+                self[rook_from] = Some(rook);
+            }
+            MoveType::EnPassant => {
+                let pawn = self[mve.to].unwrap();
+                let captured_pawn = Piece::new(PieceType::Pawn, !pawn.color());
+
+                debug_assert_eq!(save_state.captured_piece, None);
+
+                // move pawn to original position
+                self[mve.from] = Some(pawn);
+
+                // clear out pawn
+                self[mve.to] = None;
+
+                // put back captured pawn
+                let capture_pos = if pawn.color() == Color::White {
+                    mve.to + 8
+                } else {
+                    mve.to - 8
+                };
+                self[capture_pos] = Some(captured_pawn);
+            }
+            MoveType::Promotion => {
+                let promoted_piece = self[mve.to].unwrap();
+                let pawn = Piece::new(PieceType::Pawn, promoted_piece.color());
+
+                debug_assert_eq!(promoted_piece, mve.promote_to.unwrap());
+                debug_assert_ne!(
+                    save_state
+                        .captured_piece
+                        .map(|p| p.color())
+                        .unwrap_or_else(|| !pawn.color()),
+                    pawn.color()
+                );
+
+                // move pawn to original position
+                self[mve.from] = Some(pawn);
+
+                // clear out promoted piece or change back to captured
+                self[mve.to] = save_state.captured_piece;
+            }
+        }
+
+        self.zobrist_hash = save_state.zobrist_hash;
+        self.en_passant_square = save_state.en_passant_square;
+        self.half_moves_since_capture_or_pawn_move = save_state.half_moves_since_capture;
+        self.white_pieces.castle_king = save_state.white_castle_king;
+        self.white_pieces.castle_queen = save_state.white_castle_queen;
+        self.black_pieces.castle_king = save_state.black_castle_king;
+        self.black_pieces.castle_queen = save_state.black_castle_queen;
+    }
+
+    /// captured_piece should be none for EnPassant captures, as those are always pawns
+    fn create_undo_save_state(&self, captured_piece: Option<Piece>) -> BoardUndoSaveState {
+        BoardUndoSaveState {
+            zobrist_hash: self.zobrist_hash,
+            en_passant_square: self.en_passant_square,
+            half_moves_since_capture: self.half_moves_since_capture_or_pawn_move,
+            white_castle_king: self.white_pieces.castle_king,
+            white_castle_queen: self.white_pieces.castle_queen,
+            black_castle_king: self.black_pieces.castle_king,
+            black_castle_queen: self.black_pieces.castle_queen,
+            captured_piece,
+        }
     }
 }
 
@@ -1236,9 +1543,20 @@ pub mod test_fens {
         "rn1qkb1r/pbpppppp/1p3n2/6N1/8/6PB/PPPPPP1P/RNBQK2R b KQkq - 4 3";
     pub const CAPTURE_WHITE_QUEEN_ROOK: &str =
         "rnbqkbnr/pp1ppppp/8/1N4B1/8/3P4/PpPQPPPP/R3KBNR b KQkq - 1 4";
+    pub const PAWN_IN_FRONT_OF_KING_NO_CASTLE: &str =
+        "r3k2r/p1ppPpb1/bn2pnp1/4N3/4P3/1pN2Q1p/PPPBBPPP/R3K2R b KQkq - 0 1";
+
     /// https://www.chessprogramming.org/Perft_Results
     pub const POSITION_2: &str =
         "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 0";
+    /// https://www.chessprogramming.org/Perft_Results
+    pub const POSITION_3: &str = "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 0";
+    /// https://www.chessprogramming.org/Perft_Results
+    pub const POSITION_4_W: &str =
+        "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1";
+    /// https://www.chessprogramming.org/Perft_Results
+    pub const POSITION_4_B: &str =
+        "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1";
 
     pub const ALL_TEST_FENS: &[&str] = &[
         START_BOARD_FEN,
@@ -1258,7 +1576,11 @@ pub mod test_fens {
         CAPTURE_BLACK_QUEEN_ROOK,
         CAPTURE_WHITE_KING_ROOK,
         CAPTURE_BLACK_QUEEN_ROOK,
+        PAWN_IN_FRONT_OF_KING_NO_CASTLE,
         POSITION_2,
+        POSITION_3,
+        POSITION_4_W,
+        POSITION_4_B,
     ];
 }
 
@@ -1307,6 +1629,22 @@ mod test {
 
         let board = Board::from_fen(EN_PASSANT_POS_B).unwrap();
         assert_eq!(board.en_passant_square, Some(46));
+    }
+
+    #[test]
+    fn temp_move_doesnt_change_state() {
+        for fen in ALL_TEST_FENS {
+            let mut board = Board::from_fen(fen).unwrap();
+            let original = board.clone();
+            for mve in board.generate_valid_moves(board.next_move) {
+                board.with_temp_move(mve, |_| {});
+
+                // with_temp does not remove 0 counts
+                board.repetition_counter.retain(|_, count| *count > 0);
+
+                assert_eq!(board, original, "\n failed to undo move {mve:?} from {fen}");
+            }
+        }
     }
 
     mod moves {
@@ -1469,7 +1807,7 @@ mod test {
         fn captured_rook_disables_castle_white_queen() {
             let board = Board::from_fen(CAPTURE_WHITE_QUEEN_ROOK).unwrap();
             for promotion in PieceType::ALL_PROMTION_TARGETS {
-                let target_piece = Piece::new(promotion, Color::White);
+                let target_piece = Piece::new(promotion, Color::Black);
                 let mut board = board.clone();
 
                 let mut expected = Board::from_fen(&format!(
@@ -1490,7 +1828,7 @@ mod test {
     #[test]
     fn zobrist_hash_valid_after_move() {
         for fen in ALL_TEST_FENS {
-            let board = Board::from_fen(fen).unwrap();
+            let mut board = Board::from_fen(fen).unwrap();
             for mve in board.generate_valid_moves(board.next_move) {
                 let mut board = board.clone();
                 board.play_move(mve);
@@ -1508,14 +1846,15 @@ mod test {
             test_fens::{
                 CASTLE_KING_B, CASTLE_KING_W, CASTLE_QUEEN_B, CASTLE_QUEEN_W, EN_PASSANT_POS_B,
                 EN_PASSANT_POS_W, MANY_POSS_MOVES_FEN_B, MANY_POSS_MOVES_FEN_W,
-                MOST_POSS_MOVES_FEN, MOST_POSS_MOVES_FEN_B, POSITION_2, WHITE_PROMOTION,
+                MOST_POSS_MOVES_FEN, MOST_POSS_MOVES_FEN_B, PAWN_IN_FRONT_OF_KING_NO_CASTLE,
+                WHITE_PROMOTION,
             },
             Board, START_BOARD_FEN,
         };
 
         #[test]
         fn correct_move_count_1() {
-            let start = Board::from_fen(START_BOARD_FEN).unwrap();
+            let mut start = Board::from_fen(START_BOARD_FEN).unwrap();
             assert_eq!(
                 start.generate_valid_moves(start.next_move).len(),
                 20,
@@ -1530,7 +1869,7 @@ mod test {
 
         #[test]
         fn correct_move_count_2() {
-            let most_moves = Board::from_fen(MOST_POSS_MOVES_FEN).unwrap();
+            let mut most_moves = Board::from_fen(MOST_POSS_MOVES_FEN).unwrap();
             assert_eq!(
                 most_moves.generate_valid_moves(most_moves.next_move).len(),
                 216
@@ -1540,7 +1879,7 @@ mod test {
                 0
             );
 
-            let most_moves = Board::from_fen(MOST_POSS_MOVES_FEN_B).unwrap();
+            let mut most_moves = Board::from_fen(MOST_POSS_MOVES_FEN_B).unwrap();
             assert_eq!(
                 most_moves.generate_valid_moves(most_moves.next_move).len(),
                 0
@@ -1553,124 +1892,247 @@ mod test {
 
         #[test]
         fn correct_move_count_3() {
-            let board = Board::from_fen(MANY_POSS_MOVES_FEN_W).unwrap();
+            let mut board = Board::from_fen(MANY_POSS_MOVES_FEN_W).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 88);
             assert_eq!(board.generate_valid_moves(!board.next_move).len(), 90);
-            let board = Board::from_fen(MANY_POSS_MOVES_FEN_B).unwrap();
+            let mut board = Board::from_fen(MANY_POSS_MOVES_FEN_B).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 90);
             assert_eq!(board.generate_valid_moves(!board.next_move).len(), 88);
         }
 
         #[test]
         fn correct_move_count_en_passant_w() {
-            let board = Board::from_fen(EN_PASSANT_POS_W).unwrap();
+            let mut board = Board::from_fen(EN_PASSANT_POS_W).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 30);
         }
 
         #[test]
         fn correct_move_count_en_passant_b() {
-            let board = Board::from_fen(EN_PASSANT_POS_B).unwrap();
+            let mut board = Board::from_fen(EN_PASSANT_POS_B).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 20);
         }
 
         #[test]
         fn correct_move_count_castle_queen_w() {
-            let board = Board::from_fen(CASTLE_QUEEN_W).unwrap();
+            let mut board = Board::from_fen(CASTLE_QUEEN_W).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 23)
         }
 
         #[test]
         fn correct_move_count_castle_king_w() {
-            let board = Board::from_fen(CASTLE_KING_W).unwrap();
+            let mut board = Board::from_fen(CASTLE_KING_W).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 22)
         }
 
         #[test]
         fn correct_move_count_castle_queen_b() {
-            let board = Board::from_fen(CASTLE_QUEEN_B).unwrap();
+            let mut board = Board::from_fen(CASTLE_QUEEN_B).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 23)
         }
 
         #[test]
         fn correct_move_count_castle_king_b() {
-            let board = Board::from_fen(CASTLE_KING_B).unwrap();
+            let mut board = Board::from_fen(CASTLE_KING_B).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 22)
         }
 
         #[test]
         fn correct_move_count_promotion() {
-            let board = Board::from_fen(WHITE_PROMOTION).unwrap();
+            let mut board = Board::from_fen(WHITE_PROMOTION).unwrap();
             assert_eq!(board.generate_valid_moves(board.next_move).len(), 43);
         }
 
-        fn count_moves(board: &Board, depth: u32) -> u64 {
-            if depth == 0 {
-                return 1;
-            }
-            let mut count = 0;
-
-            let moves = board.generate_valid_moves(board.next_move);
-            for mve in moves {
-                let mut board = board.clone();
-                board.play_move(mve);
-
-                count += count_moves(&board, depth - 1);
-            }
-            count
+        #[test]
+        fn enemy_pawn_in_front_of_king_prohibits_castling() {
+            let mut board = Board::from_fen(PAWN_IN_FRONT_OF_KING_NO_CASTLE).unwrap();
+            assert_eq!(board.generate_valid_moves(board.next_move).len(), 36);
         }
 
-        #[test]
-        #[ignore = "slow test"]
-        fn count_moves_from_start() {
-            let board = Board::from_fen(START_BOARD_FEN).unwrap();
+        mod count {
+            use std::ops::{Add, AddAssign};
 
-            let depth_to_count: &[(u32, u64)] = &[
-                (0, 1),
-                (1, 20),
-                (2, 400),
-                (3, 8902),
-                (4, 197281),
-                // (5, 4865609),
-                // (6, 119060324),
-                // (7, 3195901860),
-                // (8, 84998978956),
-                // (9, 2439530234167),
-            ];
+            use crate::{
+                test_fens::{POSITION_2, POSITION_3, POSITION_4_B, POSITION_4_W},
+                Board, Move, START_BOARD_FEN,
+            };
 
-            println!("Count moves from start position:");
-            for (depth, count) in depth_to_count {
-                assert_eq!(
-                    count_moves(&board, *depth),
-                    *count,
-                    "Count from START for depth {depth} should be {count}"
-                );
-                println!("\t depth: {depth} => {count}");
+            #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+            struct CountedMoves {
+                total: u64,
+                captures: u32,
+                en_passant: u32,
+                castle: u32,
+                promotions: u32,
             }
-        }
 
-        #[test]
-        // #[ignore = "slow test"] // TODO set ignore once this is no longer failing
-        fn count_moves_from_position_2() {
-            let board = Board::from_fen(POSITION_2).unwrap();
+            impl CountedMoves {
+                fn new(
+                    total: u64,
+                    captures: u32,
+                    en_passant: u32,
+                    castle: u32,
+                    promotions: u32,
+                ) -> Self {
+                    CountedMoves {
+                        total,
+                        captures,
+                        en_passant,
+                        castle,
+                        promotions,
+                    }
+                }
+            }
 
-            let depth_to_count: &[(u32, u64)] = &[
-                (0, 1),
-                (1, 48),
-                (2, 2039),
-                (3, 97862),
-                (4, 4085603),
-                // (5, 197281),
-                // (6, 8031647685),
-            ];
+            impl Add<CountedMoves> for CountedMoves {
+                type Output = CountedMoves;
 
-            println!("Count moves from position 2:");
-            for (depth, count) in depth_to_count {
-                assert_eq!(
-                    count_moves(&board, *depth),
-                    *count,
-                    "Count from POSITION_2 for depth {depth} should be {count}"
-                );
-                println!("\t depth: {depth} => {count}");
+                fn add(self, rhs: CountedMoves) -> Self::Output {
+                    CountedMoves {
+                        total: self.total + rhs.total,
+                        captures: self.captures + rhs.captures,
+                        en_passant: self.en_passant + rhs.en_passant,
+                        castle: self.castle + rhs.castle,
+                        promotions: self.promotions + rhs.promotions,
+                    }
+                }
+            }
+
+            impl AddAssign for CountedMoves {
+                fn add_assign(&mut self, rhs: Self) {
+                    *self = *self + rhs;
+                }
+            }
+
+            fn count_moves(board: &mut Board, depth: u32) -> CountedMoves {
+                if depth == 0 {
+                    assert!(false);
+                }
+                let mut count = CountedMoves::default();
+
+                let moves = board.generate_valid_moves(board.next_move);
+                for mve in moves {
+                    if depth == 1 {
+                        count.total += 1;
+                        if board[mve.to].is_some() {
+                            count.captures += 1;
+                        }
+                        match mve.typ {
+                            crate::MoveType::Castle => count.castle += 1,
+                            crate::MoveType::EnPassant => {
+                                count.en_passant += 1;
+                                count.captures += 1;
+                            }
+                            crate::MoveType::Promotion => count.promotions += 1,
+                            _ => {}
+                        }
+                    } else {
+                        board.with_temp_move(mve, |board| {
+                            count += count_moves(board, depth - 1);
+                        });
+                    }
+                }
+                count
+            }
+
+            #[test]
+            #[ignore = "slow test"]
+            fn count_moves_from_start() {
+                let mut board = Board::from_fen(START_BOARD_FEN).unwrap();
+
+                let depth_to_count: &[(u32, CountedMoves)] = &[
+                    (1, CountedMoves::new(20, 0, 0, 0, 0)),
+                    (2, CountedMoves::new(400, 0, 0, 0, 0)),
+                    (3, CountedMoves::new(8902, 34, 0, 0, 0)),
+                    (4, CountedMoves::new(197281, 1576, 0, 0, 0)),
+                    // (5, 4865609),
+                    // (6, 119060324),
+                    // (7, 3195901860),
+                    // (8, 84998978956),
+                    // (9, 2439530234167),
+                ];
+
+                for (depth, count) in depth_to_count {
+                    assert_eq!(
+                        count_moves(&mut board, *depth),
+                        *count,
+                        "Count from START for depth {depth} should be {count:?}"
+                    );
+                }
+            }
+
+            #[test]
+            #[ignore = "slow test"]
+            fn count_moves_from_position_2() {
+                let mut board = Board::from_fen(POSITION_2).unwrap();
+
+                let depth_to_count: &[(u32, CountedMoves)] = &[
+                    (1, CountedMoves::new(48, 8, 0, 2, 0)),
+                    (2, CountedMoves::new(2039, 351, 1, 91, 0)),
+                    (3, CountedMoves::new(97862, 17102, 45, 3162, 0)),
+                    (4, CountedMoves::new(4085603, 757163, 1929, 128013, 15172)),
+                    // (5, 197281),
+                    // (6, 8031647685),
+                ];
+
+                for (depth, count) in depth_to_count {
+                    assert_eq!(
+                        count_moves(&mut board, *depth),
+                        *count,
+                        "\nCount from POSITION_2 for depth {depth} should be {count:?}"
+                    );
+                }
+            }
+
+            #[test]
+            #[ignore = "slow test"]
+            fn count_moves_from_position_3() {
+                let mut board = Board::from_fen(POSITION_3).unwrap();
+
+                let depth_to_count: &[(u32, CountedMoves)] = &[
+                    (1, CountedMoves::new(14, 1, 0, 0, 0)),
+                    (2, CountedMoves::new(191, 14, 0, 0, 0)),
+                    (3, CountedMoves::new(2812, 209, 2, 0, 0)),
+                    (4, CountedMoves::new(43238, 3348, 123, 0, 0)),
+                    // (5, 197281),
+                    // (6, 8031647685),
+                ];
+
+                for (depth, count) in depth_to_count {
+                    assert_eq!(
+                        count_moves(&mut board, *depth),
+                        *count,
+                        "\nCount from POSITION_3 for depth {depth} should be {count:?}"
+                    );
+                }
+            }
+
+            #[test]
+            #[ignore = "slow test"]
+            fn count_moves_from_position_4() {
+                let mut board_w = Board::from_fen(POSITION_4_W).unwrap();
+                let mut board_b = Board::from_fen(POSITION_4_B).unwrap();
+
+                let depth_to_count: &[(u32, CountedMoves)] = &[
+                    (1, CountedMoves::new(6, 0, 0, 0, 0)),
+                    (2, CountedMoves::new(264, 87, 0, 6, 48)),
+                    (3, CountedMoves::new(9467, 1021, 4, 0, 120)),
+                    (4, CountedMoves::new(422333, 131393, 0, 7795, 60032)),
+                    // (5, 197281),
+                    // (6, 8031647685),
+                ];
+
+                for (depth, count) in depth_to_count {
+                    assert_eq!(
+                        count_moves(&mut board_w, *depth),
+                        *count,
+                        "\nCount from POSITION_4_W for depth {depth} should be {count:?}"
+                    );
+                    assert_eq!(
+                        count_moves(&mut board_b, *depth),
+                        *count,
+                        "\nCount from POSITION_4_B for depth {depth} should be {count:?}"
+                    );
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 use anyhow::{bail, Context};
 
-use super::{Engine, Result};
-use crate::{utils::AtomicF32, Board, Color, Move, Piece, PieceType};
+use super::Engine;
+use crate::{utils::AtomicF32, Board, Color, Move, Piece, PieceType, Result};
 use std::{
     cmp,
     collections::HashMap,
@@ -186,11 +186,16 @@ impl Search {
         }
     }
 
-    fn search(mut self, board: Board, target_depth: u32) -> Result<()> {
+    fn search(mut self, mut board: Board, target_depth: u32) -> Result<()> {
         let control = self.control.clone();
         {
-            let result =
-                self.search_recursive(&board, 1, target_depth, f32::NEG_INFINITY, f32::INFINITY)?;
+            let result = self.search_recursive(
+                &mut board,
+                1,
+                target_depth,
+                f32::NEG_INFINITY,
+                f32::INFINITY,
+            )?;
 
             *control.best_move.lock().unwrap() = result.best_move;
             control.score.store(result.score, Ordering::SeqCst);
@@ -202,7 +207,7 @@ impl Search {
 
     fn search_recursive(
         &mut self,
-        board: &Board,
+        board: &mut Board,
         depth: u32,
         target_depth: u32,
         mut alpha: f32,
@@ -251,21 +256,24 @@ impl Search {
         let mut best_move = None;
         let mut best_score = f32::NEG_INFINITY;
         for mve in moves {
-            let mut board = board.clone();
-            board.play_move(mve);
+            if board.with_temp_move(mve, |board| -> Result<bool> {
+                let score = self
+                    .search_recursive(board, depth + 1, target_depth, -beta, -alpha)?
+                    .score;
+                let score = -score;
+                alpha = alpha.max(score);
+                if score > best_score {
+                    best_move = Some(mve);
+                    best_score = score;
+                }
 
-            let score = self
-                .search_recursive(&board, depth + 1, target_depth, -beta, -alpha)?
-                .score;
-            let score = -score;
-            alpha = alpha.max(score);
-            if score > best_score {
-                best_move = Some(mve);
-                best_score = score;
-            }
-
-            if score > beta {
-                self.stats.positions_pruned += 1;
+                if score > beta {
+                    self.stats.positions_pruned += 1;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            })? {
                 break;
             }
         }

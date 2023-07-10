@@ -1,7 +1,7 @@
 mod assets;
 mod square;
 
-use chess::{Board, Move, MoveType, Piece, PieceType, START_BOARD_FEN};
+use chess::{Board, Color, Move, MoveType, Piece, PieceType, START_BOARD_FEN};
 use iced::{
     clipboard,
     widget::{button, container, image, text},
@@ -49,15 +49,19 @@ enum GameState {
         move_squrae: u8,
         valid_moves: Vec<Move>,
     },
+    Done {
+        winner: Option<Color>,
+    },
 }
 
 impl GameState {
-    fn handle_square_clicked(&mut self, square: u8, board: &Board) -> Option<Message> {
+    fn handle_square_clicked(&mut self, square: u8, board: &mut Board) -> Option<Message> {
         let x = square % 8;
         let y = square / 8;
         println!("Clicked {square}: {x}-{y}: {:?}", board[square]);
 
         match self {
+            GameState::Done { winner: _ } => None,
             GameState::WaitingForUser => {
                 let target = board[square];
                 if target.is_some() {
@@ -177,10 +181,14 @@ impl Application for Game {
     fn update(&mut self, message: Self::Message) -> Command<Message> {
         let new_message = match message {
             Message::None => None,
-            Message::SquareClicked(idx) => self.state.handle_square_clicked(idx, &self.board),
+            Message::SquareClicked(idx) => self.state.handle_square_clicked(idx, &mut self.board),
             Message::Move(m) => {
                 self.board.play_move(m);
-                self.state = GameState::WaitingForUser;
+                if let Some(winner) = self.board.winner() {
+                    self.state = GameState::Done { winner };
+                } else {
+                    self.state = GameState::WaitingForUser;
+                }
                 None
             }
             Message::GenerateFen => {
@@ -246,7 +254,7 @@ impl Application for Game {
                         image(handle)
                     });
                     let (selected, valid_move) = match &self.state {
-                        GameState::WaitingForUser => (false, false),
+                        GameState::WaitingForUser | GameState::Done { winner: _ } => (false, false),
                         GameState::PieceSelected {
                             target_square,
                             valid_moves,
@@ -293,7 +301,7 @@ impl Application for Game {
 
         row_entries.push(board.into());
 
-        if let Some(winner) = self.board.winner() {
+        if let GameState::Done { winner } = &self.state {
             if let Some(winner) = winner {
                 row_entries.push(text(format!("Winner {winner}")).into());
             } else {
